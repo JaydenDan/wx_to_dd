@@ -85,7 +85,7 @@ class DDAuto:
     def _click_input_box(self):
         left, _, _, bottom, width, _ = self._get_window_rect()
         x = left + width // 2
-        y = bottom - 70
+        y = bottom - 120
         logger.debug(f"✅ 输入框点击坐标: ({x},{y})")
         self._click(x, y)
 
@@ -147,7 +147,9 @@ class DDAuto:
         try:
             win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
             win32gui.SetForegroundWindow(self.hwnd)
-            time.sleep(0.2)
+            time.sleep(0.1)
+            self._click_input_box()
+            time.sleep(0.1)
         except Exception as e:
             logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
 
@@ -185,77 +187,6 @@ class DDAuto:
                 await mark_username_as_processed(username)
                 logger.debug("消息 媒体URL、作者 已缓存")
                 
-    def _set_clipboard_mixed(self, text, image_path):
-        """
-        尝试使用 HTML Format 将图文同时写入剪贴板
-        """
-        try:
-            # 1. 读取图片并转 Base64 (如果钉钉支持 file:// 更好，但 file:// 往往受限)
-            # 先尝试 file:// 协议，如果不行再考虑 Base64（Base64太长可能导致剪贴板溢出）
-            # 实际上钉钉PC版通常支持 file:// 
-            # 2026-02-03: 用户反馈 file:// 协议可能无效，尝试使用 Base64
-            import base64
-            with open(image_path, "rb") as image_file:
-                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-            
-            image_src = f"data:image/png;base64,{encoded_string}"
-            
-            # 构造 HTML
-            # 注意：钉钉对 HTML 的支持有限，可能需要特定的标签结构
-            html_content = f'<span>{text}</span><br/><img src="{image_src}"/>'
-            
-            # 构造 Header
-            header_template = (
-                "Version:0.9\r\n"
-                "StartHTML:{:08d}\r\n"
-                "EndHTML:{:08d}\r\n"
-                "StartFragment:{:08d}\r\n"
-                "EndFragment:{:08d}\r\n"
-            )
-            
-            # 计算长度
-            # 先用 dummy header 占位
-            dummy_header = header_template.format(0, 0, 0, 0)
-            header_len = len(dummy_header)
-            
-            prefix = "<html><body>\r\n<!--StartFragment-->"
-            suffix = "<!--EndFragment-->\r\n</body></html>"
-            
-            start_html = header_len
-            start_fragment = start_html + len(prefix)
-            
-            # 内容必须是 utf-8 编码计算字节长度
-            content_bytes = html_content.encode('utf-8')
-            end_fragment = start_fragment + len(content_bytes)
-            
-            end_html = end_fragment + len(suffix)
-            
-            # 最终数据
-            final_header = header_template.format(start_html, end_html, start_fragment, end_fragment)
-            final_data = final_header.encode('utf-8') + prefix.encode('utf-8') + content_bytes + suffix.encode('utf-8')
-            
-            # 写入剪贴板
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
-            
-            # 注册 HTML Format
-            cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
-            win32clipboard.SetClipboardData(cf_html, final_data)
-            
-            # 同时写入纯文本作为后备？不，这可能导致优先读取纯文本
-            # win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
-            
-            win32clipboard.CloseClipboard()
-            return True
-            
-        except Exception as e:
-            logger.error("HTML 剪贴板写入失败: {}", e)
-            try:
-                win32clipboard.CloseClipboard()
-            except:
-                pass
-            return False
-
     @timeit()
     async def send(self, msg: str):
         logger.debug("准备向 '{}' 发送消息: {}", self.target_contact, msg.replace('\n', ' ')[:100])
