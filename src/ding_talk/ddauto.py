@@ -1,0 +1,324 @@
+# 文件名: ddauto_win32.py
+import win32gui
+import win32api
+import win32con
+import win32clipboard
+import pyperclip
+import time
+import os
+from io import BytesIO
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+from curl_cffi import AsyncSession
+from loguru import logger
+
+from src.config import global_config
+from src.utils.commons import timeit, extract_author
+from src.utils.deduplication import mark_url_as_processed, mark_username_as_processed
+
+
+
+class DingTalkNotFoundException(Exception):
+    pass
+
+
+class DingTalkAutomationException(Exception):
+    pass
+
+
+class DDAuto:
+    def __init__(self, target_contact: str):
+        """
+        初始化钉钉窗口，切换目标联系人
+        """
+        logger.info(f"--- [DDAuto] 初始化开始，目标: '{target_contact}' ---")
+        self.target_contact = target_contact
+
+        self.hwnd = win32gui.FindWindow("StandardFrame_DingTalk", None)
+        if not self.hwnd:
+            raise DingTalkNotFoundException("❌ 没有找到钉钉窗口，请确保已登录。")
+
+        win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(self.hwnd)
+        time.sleep(0.2)
+        
+        # 检查配置，如果是 Standby 模式，则跳过搜索联系人步骤
+        if global_config.DINGTALK_STANDBY == "1":
+            logger.info("⚠️ 钉钉处于 Standby 模式，跳过联系人搜索初始化，直接进入发送就绪状态。")
+        else:
+            # 点击搜索框（窗口顶部中间，偏移约15px）
+            self._click_search_box()
+            # 输入联系人
+            pyperclip.copy(target_contact)
+            self._paste()
+            time.sleep(1)
+            self._press_enter()
+            logger.info(f"✅ 钉钉已切换至联系人：{target_contact}")
+
+        # 点击输入框（窗口底部中间偏上70px）
+        self._click_input_box()
+        logger.info("--- [DDAuto] 初始化完成 ---")
+
+    @timeit()
+    def _get_window_rect(self):
+        left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
+        width = right - left
+        height = bottom - top
+        return left, top, right, bottom, width, height
+
+    @timeit()
+    def _click_search_box(self):
+        left, top, _, _, width, _ = self._get_window_rect()
+        x = left + width // 2
+        y = top + 15  # 固定偏移
+        logger.debug(f"🔍 搜索框点击坐标: ({x},{y})")
+        self._click(x, y)
+        time.sleep(1)
+
+    @timeit()
+    def _click_input_box(self):
+        left, _, _, bottom, width, _ = self._get_window_rect()
+        x = left + width // 2
+        y = bottom - 70
+        logger.debug(f"✅ 输入框点击坐标: ({x},{y})")
+        self._click(x, y)
+
+    @timeit()
+    def _click(self, x, y):
+        win32api.SetCursorPos((x, y))
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
+
+    @timeit()
+    def _paste(self):
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        win32api.keybd_event(ord('V'), 0, 0, 0)
+        win32api.keybd_event(ord('V'), 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+
+    @timeit()
+    def _press_enter(self):
+        win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def _set_clipboard_image(self, image_path: str):
+        """
+        将图片文件复制到剪贴板
+        """
+        if not Image:
+            logger.error("PIL (Pillow) 库未安装，无法处理图片复制！")
+            return False
+            
+        try:
+            image = Image.open(image_path)
+            output = BytesIO()
+            image.convert("RGB").save(output, "BMP")
+            data = output.getvalue()[14:] # 去掉 BMP 文件头 (14 bytes)，只保留 DIB 数据
+            output.close()
+            
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_DIB, data)
+            win32clipboard.CloseClipboard()
+            return True
+        except Exception as e:
+            logger.error(f"复制图片到剪贴板失败: {e}")
+            try:
+                win32clipboard.CloseClipboard()
+            except:
+                pass
+            return False
+
+    @timeit()
+    async def send_mixed(self, msg: str, image_path: str = None):
+        """
+        发送混合消息：先发图片，再发文字（或者反过来，根据需求）
+        """
+        logger.debug("准备向 '{}' 发送混合消息", self.target_contact)
+        
+        # 激活窗口
+        try:
+            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(self.hwnd)
+            time.sleep(0.2)
+        except Exception as e:
+            logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
+
+        # 尝试一次性写入剪贴板 (混合模式)
+        # 注意：用户反馈 HTML 混合粘贴在钉钉上无效（但在微信有效），可能是钉钉对 HTML 格式支持不佳
+        # 因此这里默认回退到分步粘贴，除非后续确认 HTML 格式已适配钉钉
+        use_mixed_mode = False 
+        
+        if use_mixed_mode and msg and image_path and os.path.exists(image_path):
+            if self._set_clipboard_mixed(msg, image_path):
+                 # 如果成功混合写入，只需粘贴一次
+                 self._paste()
+                 time.sleep(0.2)
+                 self._press_enter()
+                 logger.info("✅ 混合消息(HtmlFmt)发送指令已执行")
+                 
+                 # 后续处理...
+                 match_obj = global_config.URL_PATTERN.search(msg)
+                 if match_obj:
+                     url = match_obj.group(0)
+                     await mark_url_as_processed(url)
+                     username = extract_author(msg)
+                     await mark_username_as_processed(username)
+                 return
+
+        # 如果没有同时有图文，或者混合写入失败，回退到分步粘贴
+        
+        # 优化策略：先贴图片，再贴文字，视觉效果更好
+
+        # 1. 粘贴文本
+        if msg:
+            # 预处理文本（加空格等）
+            msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
+            pyperclip.copy(msg)
+            self._paste()
+            time.sleep(0.05) # 等待文本上屏
+
+
+        # 2. 粘贴图片
+        if image_path and os.path.exists(image_path):
+            if self._set_clipboard_image(image_path):
+                logger.debug("图片已复制到剪贴板: {}", image_path)
+                # 粘贴图片
+                self._paste()
+                time.sleep(0.05) # 等待图片上屏
+            else:
+                logger.warning("图片复制失败，略过图片。")
+
+
+        # 3. 统一发送
+        self._press_enter()
+        logger.info("✅ 混合消息发送指令已执行")
+
+        # 4. 后续处理（标记URL等）
+        if msg:
+            match_obj = global_config.URL_PATTERN.search(msg)
+            if match_obj:
+                url = match_obj.group(0)
+                await mark_url_as_processed(url)
+                username = extract_author(msg)
+                await mark_username_as_processed(username)
+                logger.debug("消息 媒体URL、作者 已缓存")
+                
+    def _set_clipboard_mixed(self, text, image_path):
+        """
+        尝试使用 HTML Format 将图文同时写入剪贴板
+        """
+        try:
+            # 1. 读取图片并转 Base64 (如果钉钉支持 file:// 更好，但 file:// 往往受限)
+            # 先尝试 file:// 协议，如果不行再考虑 Base64（Base64太长可能导致剪贴板溢出）
+            # 实际上钉钉PC版通常支持 file:// 
+            # 2026-02-03: 用户反馈 file:// 协议可能无效，尝试使用 Base64
+            import base64
+            with open(image_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            image_src = f"data:image/png;base64,{encoded_string}"
+            
+            # 构造 HTML
+            # 注意：钉钉对 HTML 的支持有限，可能需要特定的标签结构
+            html_content = f'<span>{text}</span><br/><img src="{image_src}"/>'
+            
+            # 构造 Header
+            header_template = (
+                "Version:0.9\r\n"
+                "StartHTML:{:08d}\r\n"
+                "EndHTML:{:08d}\r\n"
+                "StartFragment:{:08d}\r\n"
+                "EndFragment:{:08d}\r\n"
+            )
+            
+            # 计算长度
+            # 先用 dummy header 占位
+            dummy_header = header_template.format(0, 0, 0, 0)
+            header_len = len(dummy_header)
+            
+            prefix = "<html><body>\r\n<!--StartFragment-->"
+            suffix = "<!--EndFragment-->\r\n</body></html>"
+            
+            start_html = header_len
+            start_fragment = start_html + len(prefix)
+            
+            # 内容必须是 utf-8 编码计算字节长度
+            content_bytes = html_content.encode('utf-8')
+            end_fragment = start_fragment + len(content_bytes)
+            
+            end_html = end_fragment + len(suffix)
+            
+            # 最终数据
+            final_header = header_template.format(start_html, end_html, start_fragment, end_fragment)
+            final_data = final_header.encode('utf-8') + prefix.encode('utf-8') + content_bytes + suffix.encode('utf-8')
+            
+            # 写入剪贴板
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            
+            # 注册 HTML Format
+            cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
+            win32clipboard.SetClipboardData(cf_html, final_data)
+            
+            # 同时写入纯文本作为后备？不，这可能导致优先读取纯文本
+            # win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            
+            win32clipboard.CloseClipboard()
+            return True
+            
+        except Exception as e:
+            logger.error("HTML 剪贴板写入失败: {}", e)
+            try:
+                win32clipboard.CloseClipboard()
+            except:
+                pass
+            return False
+
+    @timeit()
+    async def send(self, msg: str):
+        logger.debug("准备向 '{}' 发送消息: {}", self.target_contact, msg.replace('\n', ' ')[:100])
+        # ✅ 每次发送前激活钉钉窗口
+        try:
+            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+            win32gui.SetForegroundWindow(self.hwnd)
+        except Exception as e:
+            logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
+
+        match_obj = global_config.URL_PATTERN.search(msg)
+        msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
+
+        # 粘贴并发送
+        pyperclip.copy(msg)
+        # 点击输入框
+        # self._click_input_box()
+        # 粘贴
+        self._paste()
+        # 回车
+        self._press_enter()
+
+        logger.info("✅ 钉钉消息发送成功")
+
+        if match_obj:
+            url = match_obj.group(0)
+            await mark_url_as_processed(url)
+            username = extract_author(msg)
+            await mark_username_as_processed(username)
+            logger.debug("消息 媒体URL、作者 已缓存")
+
+
+
+
+if __name__ == '__main__':
+    try:
+        session = AsyncSession()
+        dd_sender = DDAuto(target_contact="1111")
+        dd_sender.send("你好，这是第一条消息。")
+        time.sleep(1)
+        dd_sender.send("你好，这是第二条消息。")
+    except Exception as e:
+        logger.error("自动化失败", exc_info=True)

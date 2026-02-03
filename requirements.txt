@@ -1,0 +1,10 @@
+cachetools
+curl_cffi
+python-dotenv
+loguru
+lxml
+playwright
+pyperclip
+pywin32
+pillow
+psutil
