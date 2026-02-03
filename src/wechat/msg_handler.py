@@ -57,7 +57,12 @@ async def run_ip_check(msg) -> Optional[Tuple[str, Optional[str]]]:
     """
     result_data = await ip_should_sent(msg.content)
     if result_data:
-        logger.info("✅ 规则匹配：IP属地")
+        # 根据返回数据判断是IP匹配还是仅截图平台
+        if result_data.get('true_address'):
+            logger.info("✅ 规则匹配：IP属地验证通过")
+        else:
+            logger.info("✅ 规则匹配：特定平台截图（无需IP）")
+            
         cleaned_msg_text = msg_cleaner(msg.content)
         final_msg = msg_restructure(msg_content=cleaned_msg_text)
         
@@ -171,7 +176,7 @@ async def async_process_message(msg, chat, dd_sender):
     if url_string:
         ip_result = await run_ip_check(msg)
         if ip_result:
-            logger.info("✅ IP检查命中，处理完成。")
+            logger.info("✅ URL处理命中，处理完成。")
             text, img_path = ip_result
             if dd_sender is None:
                 await send_to_dd(msg=text)
@@ -349,36 +354,15 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
                         pass
                 return None
         
-        # 2. 如果没提取到 IP，但属于仅截图平台 (platform != unknown)，则视为通过
-        elif data.get('platform') != 'unknown':
-             from src.config.global_config import PLATFORM_CONFIG
-             # 检查是否是那些“不需要IP”的平台
-             is_screenshot_only = False
-             for domain in PLATFORM_CONFIG["screenshot_only"]:
-                 if domain.split(".")[0] in data.get('platform', ''):
-                     is_screenshot_only = True
-                     break
-             
-             if is_screenshot_only:
-                 logger.info("无需IP检测的平台 [{}]，直接通过", data['platform'])
-                 return data # 返回完整数据对象
-             else:
-                 # 是需要IP的平台，但没取到IP -> 失败
-                 # 失败，清理截图
-                 if screenshot_path and os.path.exists(screenshot_path):
-                    try:
-                        os.remove(screenshot_path)
-                        logger.debug("未获取到IP，已删除截图: {}", screenshot_path)
-                    except:
-                        pass
-                 return None
+        # 2. 如果没提取到 IP，说明不满足转发条件（要么是需要IP的平台没取到，要么是不需要IP的平台没命中关键词）
+        # 注意：不需要IP的平台（如快手），只有在命中关键词时才转发（已在 run_keyword_check 处理）。
+        # 如果走到这里，说明关键词没命中，因此无论是什么平台，只要没 IP，都不应该转发。
         
-        # 都不匹配，清理截图
+        # 失败，清理截图
         if screenshot_path and os.path.exists(screenshot_path):
             try:
                 os.remove(screenshot_path)
-                logger.debug("规则不匹配，已删除截图: {}", screenshot_path)
+                logger.debug("未满足转发条件（无IP或关键词未命中），已删除截图: {}", screenshot_path)
             except:
                 pass
-
         return None
