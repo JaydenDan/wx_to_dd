@@ -7,3 +7,4 @@ user_data/
 .vscode/
 venv/
 .idea/
+node_modules/
