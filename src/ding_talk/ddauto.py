@@ -37,12 +37,15 @@ class DDAuto:
         logger.info(f"--- [DDAuto] 初始化开始，目标: '{target_contact}' ---")
         self.target_contact = target_contact
 
-        self.hwnd = win32gui.FindWindow("StandardFrame_DingTalk", None)
+        self.hwnd = win32gui.FindWindow(None, "钉钉")
         if not self.hwnd:
             raise DingTalkNotFoundException("❌ 没有找到钉钉窗口，请确保已登录。")
 
         win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(self.hwnd)
+        try:
+            win32gui.SetForegroundWindow(self.hwnd)
+        except Exception as e:
+            logger.warning("初始化时无法置顶窗口(可能被系统限制)，尝试继续操作... 错误: {}", e)
         time.sleep(0.2)
         
         # 检查配置，如果是 Standby 模式，则跳过搜索联系人步骤
@@ -148,39 +151,13 @@ class DDAuto:
         except Exception as e:
             logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
 
-        # 尝试一次性写入剪贴板 (混合模式)
-        # 注意：用户反馈 HTML 混合粘贴在钉钉上无效（但在微信有效），可能是钉钉对 HTML 格式支持不佳
-        # 因此这里默认回退到分步粘贴，除非后续确认 HTML 格式已适配钉钉
-        use_mixed_mode = False 
-        
-        if use_mixed_mode and msg and image_path and os.path.exists(image_path):
-            if self._set_clipboard_mixed(msg, image_path):
-                 # 如果成功混合写入，只需粘贴一次
-                 self._paste()
-                 time.sleep(0.2)
-                 self._press_enter()
-                 logger.info("✅ 混合消息(HtmlFmt)发送指令已执行")
-                 
-                 # 后续处理...
-                 match_obj = global_config.URL_PATTERN.search(msg)
-                 if match_obj:
-                     url = match_obj.group(0)
-                     await mark_url_as_processed(url)
-                     username = extract_author(msg)
-                     await mark_username_as_processed(username)
-                 return
-
-        # 如果没有同时有图文，或者混合写入失败，回退到分步粘贴
-        
-        # 优化策略：先贴图片，再贴文字，视觉效果更好
-
         # 1. 粘贴文本
         if msg:
             # 预处理文本（加空格等）
-            msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
+            # msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
             pyperclip.copy(msg)
             self._paste()
-            time.sleep(0.05) # 等待文本上屏
+            time.sleep(0.2) # 等待文本上屏
 
 
         # 2. 粘贴图片
@@ -189,7 +166,7 @@ class DDAuto:
                 logger.debug("图片已复制到剪贴板: {}", image_path)
                 # 粘贴图片
                 self._paste()
-                time.sleep(0.05) # 等待图片上屏
+                time.sleep(0.2) # 等待图片上屏
             else:
                 logger.warning("图片复制失败，略过图片。")
 
