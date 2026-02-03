@@ -597,8 +597,8 @@ class PlaywrightIpChecker:
                 # 1. 用户提供的路径 (修正后)
                 # 2. 常见的底部日期位置类名
                 selectors = [
-                    '//*[@id="noteContainer"]/div[4]/div[2]/div[1]/div[2]/span[1]', # 用户指定的修正路径
-                    '//*[@id="noteContainer"]/div[4]/div[2]/div[1]/div[3]/span[1]', # 旧路径
+                    '//*[@id="noteContainer"]/div[4]/div[2]/div[1]/div[3]/span[1]', # 用户指定的修正路径
+                    '//*[@id="noteContainer"]/div[4]/div[2]/div[1]/div[2]/span[1]', # 旧路径
                     '.date', # 通用类名
                     '.note-scroller .date',
                     '.note-content .date'

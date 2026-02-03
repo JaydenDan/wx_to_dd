@@ -187,6 +187,14 @@ async def async_process_message(msg, chat, dd_sender):
             return
             
     logger.info("所有检查已完成，未匹配任何规则。")
+    # 如果到了这里，说明没有匹配成功，但是 run_ip_check 可能生成了截图
+    # 由于 run_ip_check 返回 None，我们无法直接获取 img_path
+    # 这是一个设计上的问题：process_any_url 生成了截图，但是 ip_should_sent 只返回 None 丢弃了所有信息
+    
+    # 解决方案：
+    # 1. 修改 run_ip_check 让它在不匹配时也返回截图路径以便清理（不优雅）
+    # 2. 或者在 PlaywrightIpChecker 中使用临时文件（use_temp_file=True），并依靠 Python 的 tempfile 机制清理（但 Windows 下 delete=False 需要手动删）
+    # 3. 最简单的：让 ip_should_sent 在判断不匹配时，主动清理生成的截图
     return
 
     # 下面是旧的并行代码，已注释废弃
@@ -323,6 +331,8 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
             return None
         
         # 判断逻辑：
+        screenshot_path = data.get('screenshot_path')
+
         # 1. 如果提取到了 IP (requires_ip 的平台)，必须匹配地址列表
         if data.get('true_address'):
             if data['true_address'] in global_config.ADDRESS_LIST:
@@ -330,6 +340,13 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
                 return data # 返回完整数据对象，包含截图路径
             else:
                 logger.debug("IP地址不匹配: {}", data['true_address'])
+                # 不匹配，清理截图
+                if screenshot_path and os.path.exists(screenshot_path):
+                    try:
+                        os.remove(screenshot_path)
+                        logger.debug("IP不匹配，已删除截图: {}", screenshot_path)
+                    except:
+                        pass
                 return None
         
         # 2. 如果没提取到 IP，但属于仅截图平台 (platform != unknown)，则视为通过
@@ -347,6 +364,21 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
                  return data # 返回完整数据对象
              else:
                  # 是需要IP的平台，但没取到IP -> 失败
+                 # 失败，清理截图
+                 if screenshot_path and os.path.exists(screenshot_path):
+                    try:
+                        os.remove(screenshot_path)
+                        logger.debug("未获取到IP，已删除截图: {}", screenshot_path)
+                    except:
+                        pass
                  return None
+        
+        # 都不匹配，清理截图
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                os.remove(screenshot_path)
+                logger.debug("规则不匹配，已删除截图: {}", screenshot_path)
+            except:
+                pass
 
         return None
