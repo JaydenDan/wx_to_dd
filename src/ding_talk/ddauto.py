@@ -149,9 +149,19 @@ class DDAuto:
             win32gui.SetForegroundWindow(self.hwnd)
             time.sleep(0.1)
             self._click_input_box()
-            time.sleep(0.1)
         except Exception as e:
             logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
+
+        
+        # 2. 粘贴图片
+        if image_path and os.path.exists(image_path):
+            if self._set_clipboard_image(image_path):
+                logger.debug("图片已复制到剪贴板: {}", image_path)
+                # 粘贴图片
+                self._paste()
+                time.sleep(global_config.SCREENSHOT_PASTE_WAITING) # 等待图片上屏
+            else:
+                logger.warning("图片复制失败，略过图片。")
 
         # 1. 粘贴文本
         if msg:
@@ -159,18 +169,7 @@ class DDAuto:
             # msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
             pyperclip.copy(msg)
             self._paste()
-            time.sleep(0.2) # 等待文本上屏
-
-
-        # 2. 粘贴图片
-        if image_path and os.path.exists(image_path):
-            if self._set_clipboard_image(image_path):
-                logger.debug("图片已复制到剪贴板: {}", image_path)
-                # 粘贴图片
-                self._paste()
-                time.sleep(0.2) # 等待图片上屏
-            else:
-                logger.warning("图片复制失败，略过图片。")
+            time.sleep(global_config.TEXT_PASTE_WAITING) # 等待文本上屏
 
 
         # 3. 统一发送
@@ -206,7 +205,9 @@ class DDAuto:
         # self._click_input_box()
         # 粘贴
         self._paste()
-        # 回车
+        # 等待文本上屏
+        time.sleep(global_config.TEXT_PASTE_WAITING)
+        # 回车发送
         self._press_enter()
 
         logger.info("✅ 钉钉消息发送成功")

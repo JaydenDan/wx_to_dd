@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 
 # 将项目根目录添加到 sys.path，解决模块导入问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
+from src.config.global_config import PLATFORM_CONFIG, SCREENSHOT_DELAY
 from playwright.async_api import async_playwright, Page, Browser, Playwright, BrowserContext
 from loguru import logger
 
@@ -474,7 +474,6 @@ class PlaywrightIpChecker:
             logger.info("最终 URL: {}", final_url)
             
             platform = "unknown"
-            from src.config.global_config import PLATFORM_CONFIG
             
             # 3. 域名匹配与策略分发
             requires_ip = False
@@ -523,6 +522,11 @@ class PlaywrightIpChecker:
             if platform == "xhs" and requires_ip:
                  if await page.locator(".reds-mask").count() > 0 or await page.locator(".login-container").count() > 0:
                      logger.warning("[{}] 检测到登录遮罩，可能登录态已失效！", platform)
+
+            # 4.5 等待加载
+            if SCREENSHOT_DELAY > 0:
+                logger.info("[{}] 截图前额外等待 {} 秒...", platform, SCREENSHOT_DELAY)
+                await asyncio.sleep(SCREENSHOT_DELAY)
 
             # 5. 截图
             if use_temp_file:
