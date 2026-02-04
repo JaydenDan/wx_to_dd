@@ -444,7 +444,7 @@ class PlaywrightIpChecker:
         async with PlaywrightManager.get_semaphore():
             return await self._process_any_url_internal(url, force_screenshot_only, use_temp_file)
 
-    async def _process_any_url_internal(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False) -> Optional[Dict[str, Any]]:
+    async def _process_any_url_internal(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False, retry_count: int = 0) -> Optional[Dict[str, Any]]:
         """
         内部实现逻辑
         """
@@ -459,7 +459,24 @@ class PlaywrightIpChecker:
 
         page = None
         try:
-            page = await context.new_page()
+            try:
+                page = await context.new_page()
+            except Exception as e:
+                # 捕获 TargetClosedError 或其他相关错误
+                if "closed" in str(e).lower() or "target" in str(e).lower():
+                    if retry_count < 1:
+                        logger.warning("检测到浏览器已关闭，尝试重启并重试任务...")
+                        await PlaywrightManager.stop()
+                        # 重启时 check_login=False，避免重新进行登录校验
+                        await PlaywrightManager.start(headless=True, check_login=False)
+                        # 递归重试一次
+                        return await self._process_any_url_internal(url, force_screenshot_only, use_temp_file, retry_count=1)
+                    else:
+                        logger.error("浏览器重启后依然失败，放弃任务。")
+                        raise e
+                else:
+                    raise e
+
             logger.info("正在访问: {} (Force Screenshot: {})", url, force_screenshot_only)
             
             # 1. 访问 URL

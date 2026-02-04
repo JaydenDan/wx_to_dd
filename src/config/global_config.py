@@ -64,7 +64,7 @@ PLATFORM_CONFIG = {
     ],
     # 需要使用移动端屏幕尺寸的平台
     "mobile_screen": [
-        "soulsmile.cn",
-        "kuaishou.com"
+        # "soulsmile.cn",
+        # "kuaishou.com"
     ]
 }
