@@ -9,6 +9,9 @@ import os
 import struct
 import asyncio
 from io import BytesIO
+from curl_cffi import AsyncSession
+from loguru import logger
+
 try:
     from PIL import Image
 except ImportError:
@@ -19,9 +22,6 @@ try:
 except ImportError:
     auto = None
     logger.warning("未安装 uiautomation 库，将仅使用 Win32 API 进行窗口激活")
-
-from curl_cffi import AsyncSession
-from loguru import logger
 
 from src.config import global_config
 from src.utils.commons import timeit, extract_author
