@@ -44,8 +44,25 @@ class DDAuto:
         """
         logger.info(f"--- [DDAuto] 初始化开始，目标: '{target_contact}' ---")
         self.target_contact = target_contact
+        self.uia_window = None
+        self.hwnd = None
 
-        self.hwnd = win32gui.FindWindow(None, "钉钉")
+        # 1. 优先尝试 UIA 原生查找
+        if auto:
+            try:
+                # searchDepth=1 限制只查找顶层窗口，提高效率
+                window = auto.WindowControl(searchDepth=1, Name="钉钉")
+                if window.Exists(maxSearchSeconds=1):
+                    self.uia_window = window
+                    self.hwnd = window.NativeWindowHandle
+                    logger.info("✅ [UIA] 已通过原生方式定位钉钉窗口")
+            except Exception as e:
+                logger.warning(f"⚠️ [UIA] 查找窗口异常: {e}")
+
+        # 2. Win32 兜底查找
+        if not self.hwnd:
+            self.hwnd = win32gui.FindWindow(None, "钉钉")
+        
         if not self.hwnd:
             raise DingTalkNotFoundException("❌ 没有找到钉钉窗口，请确保已登录。")
 
@@ -77,19 +94,28 @@ class DDAuto:
         """
         success = False
         # 1. 尝试 UIA 方式
-        if auto:
+        if self.uia_window:
             try:
-                window = auto.ControlFromHandle(self.hwnd)
-                if window:
-                    # SetFocus 会尝试将窗口前置并获取焦点
-                    window.SetFocus()
-                    success = True
-                    # logger.debug("✅ [UIA] 窗口激活成功")
+                # 如果窗口最小化了，先还原
+                if self.uia_window.GetWindowPattern().WindowVisualState == auto.WindowVisualState.Minimized:
+                    self.uia_window.GetWindowPattern().SetWindowVisualState(auto.WindowVisualState.Normal)
+                
+                # 尝试前置
+                self.uia_window.SetFocus()
+                success = True
             except Exception as e:
                 logger.warning(f"⚠️ [UIA] 窗口激活失败: {e}")
+                # 如果原来的 UIA 对象失效，尝试重新获取一次
+                if auto and self.hwnd:
+                    try:
+                        self.uia_window = auto.ControlFromHandle(self.hwnd)
+                        self.uia_window.SetFocus()
+                        success = True
+                    except:
+                        pass
         
         # 2. 如果 UIA 失败或未安装，使用 Win32 兜底
-        if not success:
+        if not success and self.hwnd:
             try:
                 win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
                 win32gui.SetForegroundWindow(self.hwnd)

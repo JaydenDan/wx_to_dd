@@ -341,7 +341,7 @@ def msg_cleaner(msg_content: str) -> str:
     if cleaned_message != msg_content:
         logger.debug("☑️ 检测到 SHENYANG_DELETE 内容替换，原始文本已被删减为:\n{}", formatted_msg)
     else:
-        logger.debug("✅ 未检测到需要替换的敏感词内容。")
+        logger.info("✅ 未检测到需要替换的敏感词内容。")
     # 第四步：重组消息
     return formatted_msg
 

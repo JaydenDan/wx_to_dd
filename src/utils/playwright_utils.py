@@ -726,32 +726,46 @@ class PlaywrightIpChecker:
 
             elif platform == "douyin":
                 # 策略: 必须去用户主页
-                # 入口: //*[@id="douyin-right-container"]/div[2]/div/div/div[2]/div/div[1]/div[2]/a
-                xpath_user_link = '//*[@id="douyin-right-container"]/div[2]/div/div/div[2]/div/div[1]/div[2]/a'
+                # 优先尝试通过 data-click-from="click_icon" 查找头像元素
+                # 或者使用备用的 xpath
+                xpath_user_link_v1 = 'div[data-click-from="click_icon"]'
+                xpath_user_link_v2 = '//*[@id="douyin-right-container"]/div[2]/main/div[2]/div[1]/div[1]/div/a/span/img'
+                
                 try:
                     # 抖音点击可能会打开新页面，需要处理
                     # 先尝试点击
-                    async with page.expect_popup() as popup_info:
-                        await page.click(xpath_user_link)
+                    target_locator = None
+                    if await page.locator(xpath_user_link_v1).count() > 0:
+                        target_locator = page.locator(xpath_user_link_v1).first
+                        logger.info("[{}] 使用 data-click-from 定位头像", platform)
+                    elif await page.locator(xpath_user_link_v2).count() > 0:
+                        target_locator = page.locator(xpath_user_link_v2).first
+                        logger.info("[{}] 使用备用 XPath 定位头像", platform)
                     
-                    new_page = await popup_info.value
-                    await new_page.wait_for_load_state("domcontentloaded")
-                    await new_page.wait_for_timeout(2000)
-                    
-                    # 在新页面查找IP
-                    # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
-                    # 格式: "IP属地：广东"
-                    xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]'
-                    if await new_page.locator(xpath_profile_ip).is_visible(timeout=5000):
-                        text = await new_page.locator(xpath_profile_ip).inner_text()
-                        if "：" in text:
-                            ip_address = text.split("：")[-1].strip()
-                            logger.info("[{}] 从主页获取到IP: {}", platform, ip_address)
-                            # 这里如果不关闭新页面，context关闭时也会自动关闭
-                            return ip_address
-                        elif ":" in text:
-                            ip_address = text.split(":")[-1].strip()
-                            return ip_address
+                    if target_locator:
+                        async with page.expect_popup() as popup_info:
+                            await target_locator.click()
+                        
+                        new_page = await popup_info.value
+                        await new_page.wait_for_load_state("domcontentloaded")
+                        await new_page.wait_for_timeout(2000)
+                        
+                        # 在新页面查找IP
+                        # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
+                        # 格式: "IP属地：广东"
+                        xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]'
+                        if await new_page.locator(xpath_profile_ip).is_visible(timeout=5000):
+                            text = await new_page.locator(xpath_profile_ip).inner_text()
+                            if "：" in text:
+                                ip_address = text.split("：")[-1].strip()
+                                logger.info("[{}] 从主页获取到IP: {}", platform, ip_address)
+                                # 这里如果不关闭新页面，context关闭时也会自动关闭
+                                return ip_address
+                            elif ":" in text:
+                                ip_address = text.split(":")[-1].strip()
+                                return ip_address
+                    else:
+                        logger.warning("[{}] 未找到用户头像入口", platform)
                 except Exception as e:
                     # 如果没有弹出新页面，可能是SPA跳转，尝试在当前页面找
                      logger.info("[{}] 尝试Popup跳转失败，检查当前页面: {}", platform, e)
