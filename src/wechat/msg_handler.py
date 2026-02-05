@@ -39,23 +39,21 @@ async def process_video_task(url: str, dd_sender):
         if not video_infos:
             logger.warning(f"无法解析视频 URL: {url}")
             return
+
+        # 2. 作品内无视频时, 跳过
+        if not video_infos[0].get('file_path'):
+            logger.info(f"作品内无视频, 直接发送文本消息: {video_infos[0].get('title', '')}")
+            return
             
-        # 2. 下载
+        # 3. 下载
         logger.info(f"正在下载视频... {video_infos[0].get('title', '')}")
         await loop.run_in_executor(None, client.download, video_infos)
         
-        # 3. 发送
+        # 4. 发送
         file_path = video_infos[0].get('file_path')
         if file_path and os.path.exists(file_path):
             logger.info(f"视频下载完成，准备发送: {file_path}")
             await dd_sender.send_video(file_path)
-            
-            # 4. 删除视频文件 (逻辑移除，交由 FileCleaner 处理)
-            # try:
-            #     os.remove(file_path)
-            #     logger.info(f"视频文件已删除: {file_path}")
-            # except Exception as e:
-            #     logger.error(f"删除视频文件失败: {e}")
         else:
             logger.error("视频下载失败或文件不存在")
             
@@ -87,7 +85,7 @@ async def run_keyword_check(msg) -> Optional[Tuple[str, Optional[str]]]:
         urls = global_config.URL_PATTERN.findall(source_content)
         if urls:
             url = urls[0]
-            logger.info("关键词匹配成功，准备截图 URL: {}", url)
+            logger.info("🚀 关键词匹配成功，准备截图 URL: {}", url)
             from src.utils.playwright_utils import PlaywrightIpChecker
             checker = PlaywrightIpChecker()
             # 强制截图模式，使用项目截图目录，便于清理器管理

@@ -488,7 +488,7 @@ class PlaywrightIpChecker:
 
             # 2. 获取最终跳转后的 URL 和域名
             final_url = page.url
-            logger.info("最终 URL: {}", final_url)
+            logger.debug("最终 URL: {}", final_url)
             
             platform = "unknown"
             
@@ -522,18 +522,33 @@ class PlaywrightIpChecker:
                         requires_ip = True
                         break
             else:
-                logger.info("已启用强制截图模式，跳过 IP 获取逻辑。")
+                logger.debug("已启用强制截图模式，跳过 IP 获取逻辑。")
             
             # 检查是否仅截图 (用于识别平台名称)
-            if not requires_ip:
+            # 即使 requires_ip 为 True，这里也需要确认 platform 是否已被正确设置，
+            # 如果上面匹配到了，platform 就已经有值了。
+            # 如果上面没匹配到 (requires_ip=False)，或者 force_screenshot_only=True，我们需要再次尝试识别平台名称。
+            if platform == "unknown":
                 for domain in PLATFORM_CONFIG["screenshot_only"]:
                     if domain in final_url:
                         platform = domain.split(".")[0] # 如 kuaishou, toutiao, soulsmile
                         break
+                
+                # 如果还是 unknown，再尝试匹配 ip_required 列表中的域名来获取平台名 (针对 force_screenshot_only=True 的情况)
+                if platform == "unknown":
+                     for domain in PLATFORM_CONFIG["ip_required"]:
+                        if domain in final_url:
+                            if "xiaohongshu" in domain or "xhslink" in domain:
+                                platform = "xhs"
+                            elif "douyin" in domain:
+                                platform = "douyin"
+                            elif "weibo" in domain:
+                                platform = "weibo"
+                            break
             
             # 如果是未知平台，默认只截图
             if platform == "unknown":
-                logger.info("未知平台链接，将仅执行截图: {}", final_url)
+                logger.debug("未知平台链接，将仅执行截图: {}", final_url)
 
             # 4. 特殊处理：检测遮罩 (针对小红书等)
             if platform == "xhs" and requires_ip:

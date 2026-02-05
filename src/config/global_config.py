@@ -58,6 +58,7 @@ PLATFORM_CONFIG = {
         "xiaohongshu.com",
         "douyin.com",
         "weibo.com",
+        "xhslink.com"
     ],
     # 仅需要截图的平台
     "screenshot_only": [
