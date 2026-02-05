@@ -9,10 +9,58 @@ from src.config import global_config
 from src.ding_talk.dd_hook import send_to_dd
 from src.utils.commons import timeit, extract_author
 from src.utils.deduplication import is_url_processed, is_username_processed
+from src.utils.video_manager import video_manager
 
 # --------------------------------------------------------------------------------------
 # 步骤1：将关键词和IP检查分别封装成独立的异步函数
 # --------------------------------------------------------------------------------------
+
+async def process_video_task(url: str, dd_sender):
+    """
+    异步处理视频下载和发送任务
+    """
+    if not dd_sender:
+        # Webhook 模式不支持发送本地视频文件
+        return
+
+    try:
+        logger.info(f"🎥 开始异步处理视频任务: {url}")
+        client = video_manager.client
+        if not client:
+            logger.error("VideoClient 未初始化，跳过视频下载")
+            return
+
+        # 在线程池中执行耗时操作 (解析和下载)
+        loop = asyncio.get_running_loop()
+        
+        # 1. 解析
+        # parsefromurl 通常很快，但也可能涉及网络请求
+        video_infos = await loop.run_in_executor(None, client.parsefromurl, url)
+        if not video_infos:
+            logger.warning(f"无法解析视频 URL: {url}")
+            return
+            
+        # 2. 下载
+        logger.info(f"正在下载视频... {video_infos[0].get('title', '')}")
+        await loop.run_in_executor(None, client.download, video_infos)
+        
+        # 3. 发送
+        file_path = video_infos[0].get('file_path')
+        if file_path and os.path.exists(file_path):
+            logger.info(f"视频下载完成，准备发送: {file_path}")
+            await dd_sender.send_video(file_path)
+            
+            # 4. 删除视频文件 (逻辑移除，交由 FileCleaner 处理)
+            # try:
+            #     os.remove(file_path)
+            #     logger.info(f"视频文件已删除: {file_path}")
+            # except Exception as e:
+            #     logger.error(f"删除视频文件失败: {e}")
+        else:
+            logger.error("视频下载失败或文件不存在")
+            
+    except Exception as e:
+        logger.error(f"视频处理任务异常: {e}")
 
 async def run_keyword_check(msg) -> Optional[Tuple[str, Optional[str]]]:
     """
@@ -42,8 +90,8 @@ async def run_keyword_check(msg) -> Optional[Tuple[str, Optional[str]]]:
             logger.info("关键词匹配成功，准备截图 URL: {}", url)
             from src.utils.playwright_utils import PlaywrightIpChecker
             checker = PlaywrightIpChecker()
-            # 强制截图模式，使用临时文件
-            data = await checker.process_any_url(url, force_screenshot_only=True, use_temp_file=True)
+            # 强制截图模式，使用项目截图目录，便于清理器管理
+            data = await checker.process_any_url(url, force_screenshot_only=True, use_temp_file=False)
             if data and data.get("screenshot_path"):
                 screenshot_path = data["screenshot_path"]
         
@@ -100,12 +148,14 @@ async def async_process_message(msg, chat, dd_sender):
             else:
                 await dd_sender.send_mixed(text, img_path)
             
-            # 清理临时文件
-            if img_path and os.path.exists(img_path):
-                try:
-                    os.remove(img_path)
-                except:
-                    pass
+            # 启动视频处理任务 (提取引用内容中的URL)
+            if msg.quote_content:
+                quote_url_match = global_config.URL_PATTERN.search(msg.quote_content)
+                if quote_url_match:
+                    video_url = quote_url_match.group(0)
+                    asyncio.create_task(process_video_task(video_url, dd_sender))
+
+            # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
         return
     elif msg.type == 'text':
         if msg.content == None: 
@@ -164,12 +214,15 @@ async def async_process_message(msg, chat, dd_sender):
         else:
             await dd_sender.send_mixed(text, img_path)
         
-        # 清理
-        if img_path and os.path.exists(img_path):
-            try:
-                os.remove(img_path)
-            except:
-                pass
+        # 启动视频处理任务
+        # 如果是引用消息，keyword_result 处理逻辑中可能已经触发了(上面那段代码只针对 type='quote' 的独立分支)
+        # 这里是针对 type='text' 或者 type='quote' 走下来的通用逻辑吗？
+        # 不，上面的 if msg.type == 'quote': return 已经处理了引用消息并返回了。
+        # 所以这里只可能是 type='text'。
+        if url_string:
+            asyncio.create_task(process_video_task(url_string, dd_sender))
+
+        # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
         return
 
     # 2. 如果关键词没命中，且有 URL，再进行 IP 检查
@@ -183,12 +236,11 @@ async def async_process_message(msg, chat, dd_sender):
             else:
                 await dd_sender.send_mixed(text, img_path)
             
-            # 清理
-            if img_path and os.path.exists(img_path):
-                try:
-                    os.remove(img_path)
-                except:
-                    pass
+            # 启动视频处理任务
+            if url_string:
+                asyncio.create_task(process_video_task(url_string, dd_sender))
+
+            # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
             return
             
     logger.info("所有检查已完成，未匹配任何规则。")
@@ -345,24 +397,24 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
                 return data # 返回完整数据对象，包含截图路径
             else:
                 logger.debug("IP地址不匹配: {}", data['true_address'])
-                # 不匹配，清理截图
-                if screenshot_path and os.path.exists(screenshot_path):
-                    try:
-                        os.remove(screenshot_path)
-                        logger.debug("IP不匹配，已删除截图: {}", screenshot_path)
-                    except:
-                        pass
+                # 不匹配，FileCleaner 会定期清理，无需立即删除
+                # if screenshot_path and os.path.exists(screenshot_path):
+                #     try:
+                #         os.remove(screenshot_path)
+                #         logger.debug("IP不匹配，已删除截图: {}", screenshot_path)
+                #     except:
+                #         pass
                 return None
         
         # 2. 如果没提取到 IP，说明不满足转发条件（要么是需要IP的平台没取到，要么是不需要IP的平台没命中关键词）
         # 注意：不需要IP的平台（如快手），只有在命中关键词时才转发（已在 run_keyword_check 处理）。
         # 如果走到这里，说明关键词没命中，因此无论是什么平台，只要没 IP，都不应该转发。
         
-        # 失败，清理截图
-        if screenshot_path and os.path.exists(screenshot_path):
-            try:
-                os.remove(screenshot_path)
-                logger.debug("未满足转发条件（无IP或关键词未命中），已删除截图: {}", screenshot_path)
-            except:
-                pass
+        # 失败，FileCleaner 会定期清理，无需立即删除
+        # if screenshot_path and os.path.exists(screenshot_path):
+        #     try:
+        #         os.remove(screenshot_path)
+        #         logger.debug("未满足转发条件（无IP或关键词未命中），已删除截图: {}", screenshot_path)
+        #     except:
+        #         pass
         return None

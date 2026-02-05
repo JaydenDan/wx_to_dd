@@ -8,3 +8,5 @@ pyperclip
 pywin32
 pillow
 psutil
+videofetch
+uiautomation

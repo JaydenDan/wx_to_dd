@@ -13,6 +13,8 @@ from src.utils.logger import setup_logger
 from src.ding_talk.ddauto import DDAuto
 from src.utils.wechat_dll_4_1_2_17 import RECV_CALLBACK, WeChatService, WeChatServiceHandler
 from src.wechat.msg_handler import async_process_message
+from src.utils.video_manager import video_manager
+from src.utils.file_cleaner import FileCleaner
 
 from loguru import logger
 setup_logger(level=global_config.LOG_LEVEL)
@@ -87,6 +89,13 @@ async def main():
     logger.info("starting wxhook 4.1.2.17 entry")
     loop = asyncio.get_running_loop()
 
+    # 初始化 VideoManager
+    video_manager.init_client()
+
+    # 启动文件清理线程 (每60秒清理一次5分钟前的文件)
+    cleaner = FileCleaner(interval_seconds=60, max_age_seconds=300)
+    cleaner.start()
+
     # 初始化 Playwright (提前启动浏览器)
     from src.utils.playwright_utils import PlaywrightManager
     logger.info("正在初始化 Playwright 浏览器环境...")
@@ -124,6 +133,9 @@ async def main():
 
     # 停止 Playwright
     await PlaywrightManager.stop()
+    
+    # 停止清理线程
+    cleaner.stop()
 
     service.stop()
     if thread.is_alive():

@@ -6,11 +6,19 @@ import win32clipboard
 import pyperclip
 import time
 import os
+import struct
+import asyncio
 from io import BytesIO
 try:
     from PIL import Image
 except ImportError:
     Image = None
+
+try:
+    import uiautomation as auto
+except ImportError:
+    auto = None
+    logger.warning("未安装 uiautomation 库，将仅使用 Win32 API 进行窗口激活")
 
 from curl_cffi import AsyncSession
 from loguru import logger
@@ -41,12 +49,7 @@ class DDAuto:
         if not self.hwnd:
             raise DingTalkNotFoundException("❌ 没有找到钉钉窗口，请确保已登录。")
 
-        win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-        try:
-            win32gui.SetForegroundWindow(self.hwnd)
-        except Exception as e:
-            logger.warning("初始化时无法置顶窗口(可能被系统限制)，尝试继续操作... 错误: {}", e)
-        time.sleep(0.2)
+        self._activate_window()
         
         # 检查配置，如果是 Standby 模式，则跳过搜索联系人步骤
         if global_config.DINGTALK_STANDBY == "1":
@@ -63,16 +66,45 @@ class DDAuto:
 
         # 点击输入框（窗口底部中间偏上70px）
         self._click_input_box()
+        
+        # 初始化发送锁
+        self.lock = asyncio.Lock()
         logger.info("--- [DDAuto] 初始化完成 ---")
 
-    @timeit()
+    def _activate_window(self):
+        """
+        激活钉钉窗口，首选 UIA，兜底 Win32
+        """
+        success = False
+        # 1. 尝试 UIA 方式
+        if auto:
+            try:
+                window = auto.ControlFromHandle(self.hwnd)
+                if window:
+                    # SetFocus 会尝试将窗口前置并获取焦点
+                    window.SetFocus()
+                    success = True
+                    # logger.debug("✅ [UIA] 窗口激活成功")
+            except Exception as e:
+                logger.warning(f"⚠️ [UIA] 窗口激活失败: {e}")
+        
+        # 2. 如果 UIA 失败或未安装，使用 Win32 兜底
+        if not success:
+            try:
+                win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(self.hwnd)
+                # logger.debug("✅ [Win32] 窗口激活成功")
+            except Exception as e:
+                logger.warning(f"⚠️ [Win32] 窗口激活失败: {e}")
+        
+        time.sleep(0.2)
+
     def _get_window_rect(self):
         left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
         width = right - left
         height = bottom - top
         return left, top, right, bottom, width, height
 
-    @timeit()
     def _click_search_box(self):
         left, top, _, _, width, _ = self._get_window_rect()
         x = left + width // 2
@@ -81,7 +113,6 @@ class DDAuto:
         self._click(x, y)
         time.sleep(1)
 
-    @timeit()
     def _click_input_box(self):
         left, _, _, bottom, width, _ = self._get_window_rect()
         x = left + width // 2
@@ -89,25 +120,34 @@ class DDAuto:
         logger.debug(f"✅ 输入框点击坐标: ({x},{y})")
         self._click(x, y)
 
-    @timeit()
     def _click(self, x, y):
         win32api.SetCursorPos((x, y))
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0)
 
-    @timeit()
     def _paste(self):
         win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
         win32api.keybd_event(ord('V'), 0, 0, 0)
         win32api.keybd_event(ord('V'), 0, win32con.KEYEVENTF_KEYUP, 0)
         win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
 
-
-    @timeit()
     def _press_enter(self):
         win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
         win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
 
+    def _clean_input_box(self):
+        """模拟 Ctrl+A 全选操作"""
+        time.sleep(0.1)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+        win32api.keybd_event(ord('A'), 0, 0, 0)
+        win32api.keybd_event(ord('A'), 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(win32con.VK_DELETE, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_DELETE, 0, win32con.KEYEVENTF_KEYUP, 0)
+        logger.debug("✅ 输入框已清空")
+
+    @timeit()
     def _set_clipboard_image(self, image_path: str):
         """
         将图片文件复制到剪贴板
@@ -137,89 +177,142 @@ class DDAuto:
             return False
 
     @timeit()
+    def _set_clipboard_files(self, file_paths: list):
+        """
+        将文件列表复制到剪贴板
+        """
+        try:
+            # 构造 DROPFILES 结构
+            files = ("\0".join(file_paths) + "\0\0").encode('utf-16le')
+            # DROPFILES structure: pFiles(4), pt(8), fNC(4), fWide(4)
+            # pFiles = 20 (offset where files start)
+            # fWide = 1 (Unicode)
+            header = struct.pack('Iiiii', 20, 0, 0, 0, 1) 
+            data = header + files
+            
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_HDROP, data)
+            win32clipboard.CloseClipboard()
+            return True
+        except Exception as e:
+            logger.error(f"复制文件到剪贴板失败: {e}")
+            try:
+                win32clipboard.CloseClipboard()
+            except:
+                pass
+            return False
+
+    @timeit()
+    async def send_video(self, video_path: str):
+        """
+        发送视频文件
+        """
+        if not video_path or not os.path.exists(video_path):
+            logger.warning(f"视频文件不存在: {video_path}")
+            return
+
+        async with self.lock:
+            logger.info(f"正在发送视频: {video_path}")
+            try:
+                # 激活窗口
+                self._activate_window()
+                self._click_input_box()
+                self._clean_input_box()
+
+                # 复制并粘贴视频
+                if self._set_clipboard_files([video_path]):
+                    self._paste()
+                    # 视频可能较大，粘贴后需要等待一下让客户端识别
+                    time.sleep(global_config.VIDEO_PASTE_WAITING) 
+                    self._press_enter()
+                    logger.info("✅ 视频发送指令已执行")
+                else:
+                    logger.error("❌ 视频复制到剪贴板失败")
+            except Exception as e:
+                logger.error(f"视频发送过程中出错: {e}")
+
+    @timeit()
     async def send_mixed(self, msg: str, image_path: str = None):
         """
         发送混合消息：先发图片，再发文字（或者反过来，根据需求）
         """
-        logger.debug("准备向 '{}' 发送混合消息", self.target_contact)
-        
-        # 激活窗口
-        try:
-            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(self.hwnd)
-            time.sleep(0.1)
-            self._click_input_box()
-        except Exception as e:
-            logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
+        async with self.lock:
+            logger.debug("准备向 '{}' 发送混合消息", self.target_contact)
+            
+            # 激活窗口
+            self._activate_window()
+            try:
+                self._click_input_box()
+                self._clean_input_box()
+            except Exception as e:
+                logger.warning("⚠️ 激活输入框失败: {}", e)
 
-        
-        # 2. 粘贴图片
-        if image_path and os.path.exists(image_path):
-            if self._set_clipboard_image(image_path):
-                logger.debug("图片已复制到剪贴板: {}", image_path)
-                # 粘贴图片
+            
+            # 2. 粘贴图片
+            if image_path and os.path.exists(image_path):
+                if self._set_clipboard_image(image_path):
+                    logger.debug("图片已复制到剪贴板: {}", image_path)
+                    # 粘贴图片
+                    self._paste()
+                    time.sleep(global_config.SCREENSHOT_PASTE_WAITING) # 等待图片上屏
+                else:
+                    logger.warning("图片复制失败，略过图片。")
+
+            # 1. 粘贴文本
+            if msg:
+                # 预处理文本（加空格等）
+                # msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
+                pyperclip.copy(msg)
                 self._paste()
-                time.sleep(global_config.SCREENSHOT_PASTE_WAITING) # 等待图片上屏
-            else:
-                logger.warning("图片复制失败，略过图片。")
-
-        # 1. 粘贴文本
-        if msg:
-            # 预处理文本（加空格等）
-            # msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
-            pyperclip.copy(msg)
-            self._paste()
-            time.sleep(global_config.TEXT_PASTE_WAITING) # 等待文本上屏
+                time.sleep(global_config.TEXT_PASTE_WAITING) # 等待文本上屏
 
 
-        # 3. 统一发送
-        self._press_enter()
-        logger.info("✅ 混合消息发送指令已执行")
+            # 3. 统一发送
+            self._press_enter()
+            logger.info("✅ 混合消息发送指令已执行")
 
-        # 4. 后续处理（标记URL等）
-        if msg:
+            # 4. 后续处理（标记URL等）
+            if msg:
+                match_obj = global_config.URL_PATTERN.search(msg)
+                if match_obj:
+                    url = match_obj.group(0)
+                    await mark_url_as_processed(url)
+                    username = extract_author(msg)
+                    await mark_username_as_processed(username)
+                    logger.debug("消息 媒体URL、作者 已缓存")
+                
+    @timeit()
+    async def send(self, msg: str):
+        async with self.lock:
+            logger.debug("准备向 '{}' 发送消息: {}", self.target_contact, msg.replace('\n', ' ')[:100])
+            # ✅ 每次发送前激活钉钉窗口
+            self._activate_window()
+
             match_obj = global_config.URL_PATTERN.search(msg)
+            msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
+
+            # 粘贴并发送
+            pyperclip.copy(msg)
+            # 点击输入框
+            self._click_input_box()
+            # 全选
+            self._clean_input_box()
+            # 粘贴
+            self._paste()
+            # 等待文本上屏
+            time.sleep(global_config.TEXT_PASTE_WAITING)
+            # 回车发送
+            self._press_enter()
+
+            logger.info("✅ 钉钉消息发送成功")
+
             if match_obj:
                 url = match_obj.group(0)
                 await mark_url_as_processed(url)
                 username = extract_author(msg)
                 await mark_username_as_processed(username)
                 logger.debug("消息 媒体URL、作者 已缓存")
-                
-    @timeit()
-    async def send(self, msg: str):
-        logger.debug("准备向 '{}' 发送消息: {}", self.target_contact, msg.replace('\n', ' ')[:100])
-        # ✅ 每次发送前激活钉钉窗口
-        try:
-            win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(self.hwnd)
-        except Exception as e:
-            logger.warning("⚠️ 激活钉钉窗口失败: {}", e)
-
-        match_obj = global_config.URL_PATTERN.search(msg)
-        msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
-
-        # 粘贴并发送
-        pyperclip.copy(msg)
-        # 点击输入框
-        # self._click_input_box()
-        # 粘贴
-        self._paste()
-        # 等待文本上屏
-        time.sleep(global_config.TEXT_PASTE_WAITING)
-        # 回车发送
-        self._press_enter()
-
-        logger.info("✅ 钉钉消息发送成功")
-
-        if match_obj:
-            url = match_obj.group(0)
-            await mark_url_as_processed(url)
-            username = extract_author(msg)
-            await mark_username_as_processed(username)
-            logger.debug("消息 媒体URL、作者 已缓存")
-
-
 
 
 if __name__ == '__main__':

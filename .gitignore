@@ -8,3 +8,5 @@ user_data/
 venv/
 .idea/
 node_modules/
+test/
+videodl_outputs/
