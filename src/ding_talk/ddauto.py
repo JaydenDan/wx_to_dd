@@ -77,7 +77,7 @@ class DDAuto:
             # 输入联系人
             pyperclip.copy(target_contact)
             self._paste()
-            time.sleep(1)
+            time.sleep(2)
             self._press_enter()
             logger.info(f"✅ 钉钉已切换至联系人：{target_contact}")
 

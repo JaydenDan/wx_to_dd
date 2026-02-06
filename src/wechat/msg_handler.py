@@ -41,21 +41,61 @@ async def process_video_task(url: str, dd_sender):
             return
 
         # 2. 作品内无视频时, 跳过
-        if not video_infos[0].get('file_path'):
-            logger.info(f"作品内无视频, 直接发送文本消息: {video_infos[0].get('title', '')}")
+        if not video_infos:
+            logger.info(f"作品内无视频信息, 直接发送文本消息: {url}")
             return
             
-        # 3. 下载
-        logger.info(f"正在下载视频... {video_infos[0].get('title', '')}")
-        await loop.run_in_executor(None, client.download, video_infos)
+        # 调试打印所有解析到的视频信息
+        for idx, info in enumerate(video_infos):
+            logger.debug(f"Video Info [{idx}]: {info}")
+            
+        # 3. 收集所有符合条件的 mp4 视频路径
+        # 预先收集所有需要下载的任务，过滤非 mp4
+        # 根据 videodl 逻辑，client.download(video_infos) 会处理列表中的每一项
+        # 我们需要在下载前过滤掉非 mp4 的项，以免下载了不需要的格式
         
-        # 4. 发送
-        file_path = video_infos[0].get('file_path')
-        if file_path and os.path.exists(file_path):
-            logger.info(f"视频下载完成，准备发送: {file_path}")
-            await dd_sender.send_video(file_path)
-        else:
-            logger.error("视频下载失败或文件不存在")
+        filtered_video_infos = []
+        # 定义允许的视频来源路径关键字
+        allowed_sources = ['DouyinVideoClient', 'KuaishouVideoClient', 'RednoteVideoClient', 'WeiboVideoClient']
+        
+        for info in video_infos:
+            file_path = info.get('file_path', '')
+            
+            # 1. 检查格式是否为 mp4
+            if not file_path or not file_path.lower().endswith('.mp4'):
+                logger.debug(f"跳过非mp4资源: {info.get('title', 'Unknown')} - {file_path}")
+                continue
+                
+            # 2. 检查路径是否包含指定的来源关键字
+            # 注意：在 Windows 路径中，分隔符可能是 \，所以直接检查字符串包含即可
+            is_allowed_source = False
+            for source in allowed_sources:
+                if source in file_path:
+                    is_allowed_source = True
+                    break
+            
+            if not is_allowed_source:
+                logger.debug(f"跳过非指定来源资源: {info.get('title', 'Unknown')} - {file_path}")
+                continue
+                
+            filtered_video_infos.append(info)
+        
+        if not filtered_video_infos:
+            logger.debug("没有找到有效的 MP4 视频资源（且来源合法），跳过下载。")
+            return
+
+        # 4. 下载
+        logger.info(f"正在下载 {len(filtered_video_infos)} 个视频...")
+        await loop.run_in_executor(None, client.download, filtered_video_infos)
+        
+        # 5. 收集下载后的文件路径并发送
+        for info in filtered_video_infos:
+            file_path = info.get('file_path')
+            if file_path and os.path.exists(file_path):
+                logger.info(f"视频下载完成，准备发送: {file_path}")
+                await dd_sender.send_video(file_path)
+            else:
+                logger.error(f"视频文件不存在: {file_path}")
             
     except Exception as e:
         logger.error(f"视频处理任务异常: {e}")
