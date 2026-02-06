@@ -292,12 +292,6 @@ async def async_process_message(msg, chat, dd_sender):
     # 3. 最简单的：让 ip_should_sent 在判断不匹配时，主动清理生成的截图
     return
 
-    # 下面是旧的并行代码，已注释废弃
-    """
-    # --- 并行竞赛开始 ---
-    tasks = []
-    # ...
-    """
 
 def check_keyword(msg) -> bool:
     is_quote_msg = msg.type == 'quote'
@@ -393,9 +387,9 @@ def msg_restructure(msg_content: str, quote_content: Optional[str] = None) -> st
     :param quote_content: 被引用的消息内容. A 引用了 B 的消息, quote_content = B
     """
     if quote_content:
-        restructured_msg = '沈阳处\n落查：' + msg_content + '\n' + quote_content
+        restructured_msg = f'{global_config.SENDER_NAME}\n落查：' + msg_content + '\n' + quote_content
     else:
-        restructured_msg = '沈阳处\n' + msg_content
+        restructured_msg = f'{global_config.SENDER_NAME}\n' + msg_content
     return restructured_msg
 
 async def ip_should_sent(msg_content) -> Optional[dict]:
