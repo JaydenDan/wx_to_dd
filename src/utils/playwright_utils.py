@@ -728,21 +728,44 @@ class PlaywrightIpChecker:
 
             elif platform == "douyin":
                 # 策略: 必须去用户主页
-                # 优先尝试通过 data-click-from="click_icon" 查找头像元素
-                # 或者使用备用的 xpath
-                xpath_user_link_v1 = 'div[data-click-from="click_icon"]'
-                xpath_user_link_v2 = '//*[@id="douyin-right-container"]/div[2]/main/div[2]/div[1]/div[1]/div/a/span/img'
+                # 用户提供的两种 Full XPath
+                xpath_user_link_v1 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/div/div/div[2]/div/div[1]/div[1]/div/a/span/img'
+                xpath_user_link_v2 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/main/div[2]/div[1]/div[1]/div/a/span/img'
                 
                 try:
                     # 抖音点击可能会打开新页面，需要处理
                     # 先尝试点击
                     target_locator = None
-                    if await page.locator(xpath_user_link_v1).count() > 0:
-                        target_locator = page.locator(xpath_user_link_v1).first
-                        logger.info("[{}] 使用 data-click-from 定位头像", platform)
-                    elif await page.locator(xpath_user_link_v2).count() > 0:
-                        target_locator = page.locator(xpath_user_link_v2).first
-                        logger.info("[{}] 使用备用 XPath 定位头像", platform)
+                    
+                    # 1. 尝试第一种 XPath
+                    loc1 = page.locator(xpath_user_link_v1).first
+                    if await loc1.count() > 0:
+                        # 检查可见性 (超时时间设为 1000ms，快速失败)
+                        try:
+                            if await loc1.is_visible(timeout=1000):
+                                target_locator = loc1
+                                logger.info("[{}] 使用 XPath V1 定位头像 (Visible)", platform)
+                            else:
+                                logger.warning("[{}] XPath V1 元素存在但不可见，尝试备用方案...", platform)
+                        except:
+                            logger.warning("[{}] XPath V1 可见性检查超时", platform)
+                    
+                    # 2. 如果首选失败，尝试第二种 XPath
+                    if not target_locator:
+                        loc2 = page.locator(xpath_user_link_v2).first
+                        if await loc2.count() > 0:
+                             try:
+                                 if await loc2.is_visible(timeout=1000):
+                                    target_locator = loc2
+                                    logger.info("[{}] 使用 XPath V2 定位头像 (Visible)", platform)
+                                 else:
+                                     logger.warning("[{}] XPath V2 元素存在但不可见", platform)
+                             except:
+                                 logger.warning("[{}] XPath V2 可见性检查超时", platform)
+                        else:
+                             # 如果两个都没找到，尝试在移动端布局下的可能位置（可选）
+                             logger.warning("[{}] 抖音用户头像元素未找到 (XPath V1/V2)", platform)
+                             pass
                     
                     if target_locator:
                         new_page = None
