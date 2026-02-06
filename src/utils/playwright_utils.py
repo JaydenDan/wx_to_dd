@@ -569,7 +569,9 @@ class PlaywrightIpChecker:
                     filepath = tmp.name
                 logger.info("[{}] 使用临时截图文件: {}", platform, filepath)
             else:
-                filename = f"{platform}_{int(time.time())}.png"
+                import uuid
+                # 使用 UUID 避免高并发下的文件名冲突
+                filename = f"{platform}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
                 filepath = os.path.join(self.screenshot_dir, filename)
 
             try:
@@ -743,27 +745,35 @@ class PlaywrightIpChecker:
                         logger.info("[{}] 使用备用 XPath 定位头像", platform)
                     
                     if target_locator:
-                        async with page.expect_popup() as popup_info:
-                            await target_locator.click()
-                        
-                        new_page = await popup_info.value
-                        await new_page.wait_for_load_state("domcontentloaded")
-                        await new_page.wait_for_timeout(2000)
-                        
-                        # 在新页面查找IP
-                        # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
-                        # 格式: "IP属地：广东"
-                        xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]'
-                        if await new_page.locator(xpath_profile_ip).is_visible(timeout=5000):
-                            text = await new_page.locator(xpath_profile_ip).inner_text()
-                            if "：" in text:
-                                ip_address = text.split("：")[-1].strip()
-                                logger.info("[{}] 从主页获取到IP: {}", platform, ip_address)
-                                # 这里如果不关闭新页面，context关闭时也会自动关闭
-                                return ip_address
-                            elif ":" in text:
-                                ip_address = text.split(":")[-1].strip()
-                                return ip_address
+                        new_page = None
+                        try:
+                            async with page.expect_popup() as popup_info:
+                                await target_locator.click()
+                            
+                            new_page = await popup_info.value
+                            await new_page.wait_for_load_state("domcontentloaded")
+                            await new_page.wait_for_timeout(2000)
+                            
+                            # 在新页面查找IP
+                            # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
+                            # 格式: "IP属地：广东"
+                            xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]'
+                            if await new_page.locator(xpath_profile_ip).is_visible(timeout=5000):
+                                text = await new_page.locator(xpath_profile_ip).inner_text()
+                                if "：" in text:
+                                    ip_address = text.split("：")[-1].strip()
+                                    logger.info("[{}] 从主页获取到IP: {}", platform, ip_address)
+                                    return ip_address
+                                elif ":" in text:
+                                    ip_address = text.split(":")[-1].strip()
+                                    return ip_address
+                        finally:
+                            if new_page:
+                                try:
+                                    await new_page.close()
+                                    logger.debug("[{}] 抖音个人主页已关闭", platform)
+                                except Exception as e:
+                                    logger.warning("[{}] 关闭抖音个人主页失败: {}", platform, e)
                     else:
                         logger.warning("[{}] 未找到用户头像入口", platform)
                 except Exception as e:
