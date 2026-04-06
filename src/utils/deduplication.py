@@ -18,6 +18,24 @@ async def is_url_processed(url: str) -> bool:
         return False
     # 锁在这里会自动释放
 
+
+async def claim_url_if_not_processed(url: str) -> bool:
+    """
+    原子地检查并占用一个 URL。
+    返回 True 表示本次成功占坑，可继续处理；
+    返回 False 表示该 URL 已在缓存中，应跳过。
+    """
+    if not url:
+        return True
+
+    async with URL_CACHE_LOCK:
+        if url in PROCESSED_URLS_CACHE:
+            PROCESSED_URLS_CACHE[url] = True
+            return False
+        PROCESSED_URLS_CACHE[url] = True
+        logger.debug("已原子占用URL: {}", url)
+        return True
+
 # 注意：函数现在是异步的 (async def)
 async def mark_url_as_processed(url: str):
     """
@@ -27,6 +45,19 @@ async def mark_url_as_processed(url: str):
         PROCESSED_URLS_CACHE[url] = True
         logger.debug("已将URL标记为已处理: {}", url)
     # 锁在这里会自动释放
+
+
+async def release_claimed_url(url: str):
+    """
+    释放之前占用但最终发送失败的 URL。
+    """
+    if not url:
+        return
+
+    async with URL_CACHE_LOCK:
+        if url in PROCESSED_URLS_CACHE:
+            del PROCESSED_URLS_CACHE[url]
+            logger.debug("已释放占用URL: {}", url)
 
 # --- 新增：用户名去重逻辑 ---
 PROCESSED_USERNAMES_CACHE = LRUCache(maxsize=64)  # 您可以为用户名设置不同的大小

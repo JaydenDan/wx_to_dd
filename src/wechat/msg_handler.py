@@ -8,7 +8,7 @@ from loguru import logger
 from src.config import global_config
 from src.ding_talk.dd_hook import send_to_dd
 from src.utils.commons import timeit, extract_author
-from src.utils.deduplication import is_url_processed, is_username_processed
+from src.utils.deduplication import claim_url_if_not_processed, is_username_processed, release_claimed_url
 from src.utils.video_manager import video_manager
 
 # --------------------------------------------------------------------------------------
@@ -233,12 +233,14 @@ async def async_process_message(msg, chat, dd_sender):
     url_match = global_config.URL_PATTERN.search(msg.content)
     url_string = url_match.group(0) if url_match else None
 
-    url_has_processed = await is_url_processed(url_string)
     username_has_processed = await is_username_processed(username)
+    url_claimed = False
     if global_config.SYSTEM_ENV == 'prod' and msg.type == 'text':
-        if url_string and url_has_processed:
-            logger.info("该 URL 已被处理，跳过: {}", url_string)
-            return
+        if url_string:
+            url_claimed = await claim_url_if_not_processed(url_string)
+            if not url_claimed:
+                logger.info("该 URL 已被处理，跳过: {}", url_string)
+                return
         elif username and username_has_processed:
             logger.info("该 用户名 已被处理，跳过: {}", username)
             return
@@ -270,10 +272,15 @@ async def async_process_message(msg, chat, dd_sender):
     if keyword_result:
         logger.info("✅ 关键词检查命中，处理完成。")
         text, _ = keyword_result
-        if dd_sender is None:
-            await send_to_dd(msg=text)
-        else:
-            await dd_sender.send(text)
+        try:
+            if dd_sender is None:
+                await send_to_dd(msg=text)
+            else:
+                await dd_sender.send(text)
+        except Exception:
+            if url_claimed and url_string:
+                await release_claimed_url(url_string)
+            raise
         
         if dd_sender and url_string:
             # 先发纯文字，再在后台补发截图，最后继续处理视频。
@@ -288,10 +295,15 @@ async def async_process_message(msg, chat, dd_sender):
         if ip_result:
             logger.info("✅ URL处理命中，处理完成。")
             text, img_path = ip_result
-            if dd_sender is None:
-                await send_to_dd(msg=text)
-            else:
-                await dd_sender.send_mixed(text, img_path)
+            try:
+                if dd_sender is None:
+                    await send_to_dd(msg=text)
+                else:
+                    await dd_sender.send_mixed(text, img_path)
+            except Exception:
+                if url_claimed and url_string:
+                    await release_claimed_url(url_string)
+                raise
             
             # 启动视频处理任务
             if url_string:
@@ -300,6 +312,9 @@ async def async_process_message(msg, chat, dd_sender):
             # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
             return
             
+    if url_claimed and url_string:
+        await release_claimed_url(url_string)
+
     logger.info("所有检查已完成，未匹配任何规则。")
     # 如果到了这里，说明没有匹配成功，但是 run_ip_check 可能生成了截图
     # 由于 run_ip_check 返回 None，我们无法直接获取 img_path

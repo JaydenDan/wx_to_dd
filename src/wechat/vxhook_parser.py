@@ -135,10 +135,10 @@ def build_message_from_vxhook_payload(payload: dict) -> Tuple[Optional[SimpleNam
     return None, room_wxid
 
 
-def describe_vxhook_payload(payload: dict) -> Tuple[str, str, str]:
+def describe_vxhook_payload(payload: dict) -> Tuple[str, str, str, Optional[str]]:
     """
     提取日志所需的消息摘要信息。
-    返回值为 (事件描述, 发送者, 内容摘要)。
+    返回值为 (事件描述, 发送者, 内容摘要, 引用摘要)。
     """
     event_desc = str(payload.get("event_desc") or payload.get("messageType") or "未知事件")
     from_user = extract_wechat_string(payload.get("fromUserName"))
@@ -148,7 +148,9 @@ def describe_vxhook_payload(payload: dict) -> Tuple[str, str, str]:
     sender = f"{nickname} [{from_user}]" if nickname else from_user
     if is_quote_message(payload):
         reply_content, original_content = extract_quote_from_content_xml(payload)
-        summary = f"引用: {reply_content or ''} | 原文: {original_content or ''}".strip(" |")[:80]
+        summary = str(reply_content or "").replace("\n", " ")[:80]
+        quoted = str(original_content or "").replace("\n", " ")[:50]
     else:
         summary = str(real_content).replace("\n", " ")[:80]
-    return event_desc, sender, summary
+        quoted = None
+    return event_desc, sender, summary, quoted

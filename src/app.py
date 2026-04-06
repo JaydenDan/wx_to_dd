@@ -106,8 +106,11 @@ async def receive_message(request: Request):
     if not should_handle_vxhook_payload(payload):
         return {"code": 0, "msg": "success"}
 
-    event_desc, sender, summary = describe_vxhook_payload(payload)
-    logger.info("[收到 {}] | 发送者: {} | 内容: {}", event_desc, sender, summary)
+    event_desc, sender, summary, quoted = describe_vxhook_payload(payload)
+    if quoted:
+        logger.info("[收到 {}] | 发送者: {} | 内容: {} | 引用: {}", event_desc, sender, summary, quoted)
+    else:
+        logger.info("[收到 {}] | 发送者: {} | 内容: {}", event_desc, sender, summary)
 
     dd_sender = getattr(request.app.state, "dd_sender", None)
     asyncio.create_task(dispatch_vxhook_payload(payload, dd_sender))
