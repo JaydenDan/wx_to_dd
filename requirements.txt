@@ -3,6 +3,8 @@ curl_cffi
 python-dotenv
 loguru
 lxml
+fastapi
+uvicorn
 playwright
 pyperclip
 pywin32
