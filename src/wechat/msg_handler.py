@@ -170,7 +170,7 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
                 quote_url_match = global_config.URL_PATTERN.search(msg_quote_content)
                 if quote_url_match:
                     video_url = quote_url_match.group(0)
-                    process_video_task(video_url, dd_sender)
+                    await process_video_task(video_url, dd_sender)
 
         return
 
@@ -222,7 +222,7 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
                 raise
             
             if dd_sender and url_string:
-                process_video_task(url_string, dd_sender)
+                await process_video_task(url_string, dd_sender)
 
             return
 
@@ -249,7 +249,7 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
                 
                 # 启动视频处理任务
                 if url_string:
-                    process_video_task(url_string, dd_sender)
+                    await process_video_task(url_string, dd_sender)
 
                 return
                 
