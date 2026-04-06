@@ -101,82 +101,24 @@ async def process_video_task(url: str, dd_sender):
     except Exception as e:
         logger.error(f"视频处理任务异常: {e}")
 
-async def run_keyword_check(msg_type: str, msg_content: str, msg_quote_content: str, include_screenshot: bool = True) -> Optional[Tuple[str, Optional[str]]]:
+async def capture_screenshot(source_content: str) -> Optional[str]:
     """
-    执行关键词检查。
-    如果匹配，返回 (处理好的消息文本, 截图路径)；否则返回 None。
-    当 include_screenshot 为 False 时，仅组装文本，不阻塞等待截图。
+    独立封装的截图逻辑。
+    从提供的文本中提取 URL 并进行截图。
+    返回截图路径，如果未找到 URL 或截图失败则返回 None。
     """
-    if check_keyword(msg_type, msg_content, msg_quote_content):
-        logger.info("✅ 规则匹配：关键词")
-        # 引用消息和普通消息清理对象不同
-        content_to_clean = msg_quote_content if msg_type == 'quote' else msg_content
-        cleaned_msg = msg_cleaner(content_to_clean)
-
-        if msg_type == 'quote':
-            final_msg = msg_restructure(quote_content=cleaned_msg, msg_content=msg_content)
-            logger.debug("引用消息处理完成，最终消息: {}", final_msg)
-            # 引用消息：尝试从被引用的内容中提取 URL
-            source_content = msg_quote_content
-        else:
-            final_msg = msg_restructure(msg_content=cleaned_msg)
-            # 文本消息：尝试从内容中提取 URL
-            source_content = msg_content
-            
-        screenshot_path = None
-        if include_screenshot:
-            urls = global_config.URL_PATTERN.findall(source_content)
-            if urls:
-                url = urls[0]
-                logger.info("🚀 关键词匹配成功，准备截图 URL: {}", url)
-                checker = PlaywrightIpChecker()
-                # 强制截图模式，使用项目截图目录，便于清理器管理
-                data = await checker.process_any_url(url, force_screenshot_only=True, use_temp_file=False)
-                if data and data.get("screenshot_path"):
-                    screenshot_path = data["screenshot_path"]
-        
-        return final_msg, screenshot_path
-        
+    urls = global_config.URL_PATTERN.findall(source_content)
+    if urls:
+        url = urls[0]
+        logger.info("🚀 关键词匹配成功，准备截图 URL: {}", url)
+        from src.utils.playwright_utils import PlaywrightIpChecker
+        checker = PlaywrightIpChecker()
+        # 强制截图模式，使用项目截图目录，便于清理器管理
+        data = await checker.process_any_url(url, force_screenshot_only=True, use_temp_file=False)
+        if data and data.get("screenshot_path"):
+            return data["screenshot_path"]
     return None
 
-
-async def process_keyword_followup_task(msg_type: str, msg_content: str, msg_quote_content: str, final_msg: str, dd_sender, video_url: Optional[str] = None):
-    """
-    处理关键词命中后的后台任务。
-    先补发文字加截图，再继续处理后续视频发送，保证发送顺序符合预期。
-    """
-    try:
-        keyword_result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=True)
-        if keyword_result and dd_sender:
-            _, img_path = keyword_result
-            if img_path:
-                logger.info("🖼️ 关键词落查截图已生成，开始补发图文消息。")
-                await dd_sender.send_mixed(final_msg, img_path)
-
-        if video_url:
-            await process_video_task(video_url, dd_sender)
-    except Exception as e:
-        logger.error("关键词落查后台补发任务异常: {}", e)
-
-async def run_ip_check(msg_content: str) -> Optional[Tuple[str, Optional[str]]]:
-    """
-    执行IP检查。如果匹配，返回 (处理好的消息文本, 截图路径)；否则返回 None。
-    """
-    result_data = await ip_should_sent(msg_content)
-    if result_data:
-        # 根据返回数据判断是IP匹配还是仅截图平台
-        if result_data.get('true_address'):
-            logger.info("✅ 规则匹配：IP属地验证通过")
-        else:
-            logger.info("✅ 规则匹配：特定平台截图（无需IP）")
-            
-        cleaned_msg_text = msg_cleaner(msg_content)
-        final_msg = msg_restructure(msg_content=cleaned_msg_text)
-        
-        # 从 result_data 中获取截图路径
-        screenshot_path = result_data.get('screenshot_path')
-        return final_msg, screenshot_path
-    return None
 
 # --------------------------------------------------------------------------------------
 # 步骤2：重写主处理函数，实现并行竞赛逻辑
@@ -203,28 +145,35 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
             logger.warning("引用消息内容为空: {}", msg_content)
             return
         msg_quote_content = msg_quote_content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
-        msg_quote_content = msg_cleaner(msg_quote_content)
-        # 如果是引用消息则直接判断关键词返回即可
-        result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=False)
-        logger.debug("quote checked = {}", result)
         
-        if result:
-            text, _ = result
-            if dd_sender is None:
-                await send_to_dd(msg=text)
-            else:
-                await dd_sender.send(text)
+        # 如果是引用消息则直接判断关键词返回即可
+        if check_keyword(msg_type, msg_content, msg_quote_content):
+            logger.info("✅ 规则匹配：关键词")
+            # 构建最终消息文本
+            cleaned_quote = msg_cleaner(msg_quote_content)
+            final_text = msg_restructure(quote_content=cleaned_quote, msg_content=msg_content)
             
-            # 关键词命中后，先发纯文字，再在后台补发截图和后续视频
+            if dd_sender is None:
+                await send_to_dd(msg=final_text)
+            else:
+                await dd_sender.send(final_text)
+            
+            # 关键词命中后，直接在当前协程/任务中顺序执行后续逻辑
             if dd_sender and msg_quote_content:
+                # 1. 截图并补发图文消息
+                img_path = await capture_screenshot(msg_quote_content)
+                if img_path:
+                    logger.info("🖼️ 关键词落查截图已生成，开始补发图文消息。")
+                    await dd_sender.send_mixed(final_text, img_path)
+
+                # 2. 提取 URL 并触发视频下载任务
                 quote_url_match = global_config.URL_PATTERN.search(msg_quote_content)
                 if quote_url_match:
                     video_url = quote_url_match.group(0)
-                    asyncio.create_task(process_keyword_followup_task(msg_type, msg_content, msg_quote_content, text, dd_sender, video_url))
-                else:
-                    asyncio.create_task(process_keyword_followup_task(msg_type, msg_content, msg_quote_content, text, dd_sender))
+                    process_video_task(video_url, dd_sender)
 
         return
+
     elif msg_type == 'text':
         if not msg_content: 
             logger.warning("文本消息内容为空")
@@ -233,71 +182,79 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
         username = extract_author(msg_content)
         msg_content = msg_cleaner(msg_content)
 
-    # 提前提取URL，用于去重
-    url_match = global_config.URL_PATTERN.search(msg_content)
-    url_string = url_match.group(0) if url_match else None
+        url_match = global_config.URL_PATTERN.search(msg_content)
+        url_string = url_match.group(0) if url_match else None
 
-    username_has_processed = await is_username_processed(username) if msg_type == 'text' else False
-    url_claimed = False
-    if global_config.SYSTEM_ENV == 'prod' and msg_type == 'text':
-        if url_string:
-            url_claimed = await claim_url_if_not_processed(url_string)
-            if not url_claimed:
-                logger.info("该 URL 已被处理，跳过: {}", url_string)
+        username_has_processed = await is_username_processed(username)
+        url_claimed = False
+        if global_config.SYSTEM_ENV == 'prod' and msg_type == 'text':
+            if url_string:
+                url_claimed = await claim_url_if_not_processed(url_string)
+                if not url_claimed:
+                    logger.info("该 URL 已被处理，跳过: {}", url_string)
+                    return
+            elif username and username_has_processed:
+                logger.info("该 用户名 已被处理，跳过: {}", username)
                 return
-        elif username and username_has_processed:
-            logger.info("该 用户名 已被处理，跳过: {}", username)
-            return
 
-    # 方案 A：简单串行
-    keyword_result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=True)
-    if keyword_result:
-        logger.info("✅ 关键词检查命中，处理完成。")
-        text, img_path = keyword_result
-        try:
-            if dd_sender is None:
-                await send_to_dd(msg=text)
-            else:
-                if img_path:
-                    await dd_sender.send_mixed(text, img_path)
-                else:
-                    await dd_sender.send(text)
-        except Exception:
-            if url_claimed and url_string:
-                await release_claimed_url(url_string)
-            raise
-        
-        if dd_sender and url_string:
-            # 关键词检查已包含截图，直接处理后续视频
-            asyncio.create_task(process_video_task(url_string, dd_sender))
-
-        return
-
-    # 2. 如果关键词没命中，且有 URL，再进行 IP 检查
-    if url_string:
-        # IP 检查同样需要使用带有完整 URL 的原文
-        ip_result = await run_ip_check(original_content if msg_type == 'text' else msg_content)
-        if ip_result:
-            logger.info("✅ URL处理命中，处理完成。")
-            text, img_path = ip_result
+        # 方案 A：简单串行
+        if check_keyword(msg_type, msg_content, ""):
+            logger.info("✅ 关键词检查命中，处理完成。")
+            
+            # 组装清理后的最终文本
+            cleaned_text = msg_cleaner(msg_content)
+            final_text = msg_restructure(msg_content=cleaned_text)
+            
+            # 触发截图
+            img_path = await capture_screenshot(msg_content)
+            
             try:
                 if dd_sender is None:
-                    await send_to_dd(msg=text)
+                    await send_to_dd(msg=final_text)
                 else:
-                    await dd_sender.send_mixed(text, img_path)
+                    if img_path:
+                        await dd_sender.send_mixed(final_text, img_path)
+                    else:
+                        await dd_sender.send(final_text)
             except Exception:
                 if url_claimed and url_string:
                     await release_claimed_url(url_string)
                 raise
             
-            # 启动视频处理任务
-            if url_string:
-                asyncio.create_task(process_video_task(url_string, dd_sender))
+            if dd_sender and url_string:
+                process_video_task(url_string, dd_sender)
 
             return
-            
-    if url_claimed and url_string:
-        await release_claimed_url(url_string)
+
+        # 如果关键词没命中，且有 URL，再进行 IP 检查
+        if url_string:
+            # IP 检查同样需要使用带有完整 URL 的原文
+            ip_result = await ip_should_sent(msg_content)
+            if ip_result:
+                logger.info("✅ URL处理命中，处理完成。")
+                
+                cleaned_msg_text = msg_cleaner(msg_content)
+                final_msg = msg_restructure(msg_content=cleaned_msg_text)
+                img_path = ip_result.get('screenshot_path')
+                
+                try:
+                    if dd_sender is None:
+                        await send_to_dd(msg=final_msg)
+                    else:
+                        await dd_sender.send_mixed(final_msg, img_path)
+                except Exception:
+                    if url_claimed and url_string:
+                        await release_claimed_url(url_string)
+                    raise
+                
+                # 启动视频处理任务
+                if url_string:
+                    process_video_task(url_string, dd_sender)
+
+                return
+                
+        if url_claimed and url_string:
+            await release_claimed_url(url_string)
 
     logger.info("所有检查已完成，未匹配任何规则。")
     return
@@ -316,7 +273,7 @@ def check_keyword(msg_type: str, msg_content: str, msg_quote_content: str) -> bo
         # 引用消息不用管原消息内容, 只需要检查引用消息内容是否有关键字
         found_keyword = None
         # 优先检查车次
-        train_match = global_config.SHENGYANG_TRAIN.search(cite_msg)
+        train_match = global_config.SHENYANG_TRAIN.search(cite_msg)
         if train_match:
             found_keyword = train_match.group(0)
             logger.debug("引用回复内容匹配到 [车次] 关键词: '{}'", found_keyword)
@@ -350,7 +307,7 @@ def check_keyword(msg_type: str, msg_content: str, msg_quote_content: str) -> bo
         # ======================= [分开检查并记录关键词] =======================
         found_keyword = None
         # 优先检查车次
-        train_match = global_config.SHENGYANG_TRAIN.search(message)
+        train_match = global_config.SHENYANG_TRAIN.search(message)
         if train_match:
             found_keyword = train_match.group(0)
             logger.debug("匹配到 [车次] 关键词: '{}'", found_keyword)
@@ -363,7 +320,7 @@ def check_keyword(msg_type: str, msg_content: str, msg_quote_content: str) -> bo
 
         # 如果两个都没匹配到，则返回
         if not found_keyword:
-            logger.info('普通文本消息 SHENGYANG_TRAIN 和 SHENYANG_STATION 校验未通过')
+            logger.info('普通文本消息 SHENYANG_TRAIN 和 SHENYANG_STATION 校验未通过')
             return False
         return True
 
@@ -428,9 +385,6 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
 
         if data is None:
             return None
-        
-        # 判断逻辑：
-        screenshot_path = data.get('screenshot_path')
 
         # 1. 如果提取到了 IP (requires_ip 的平台)，必须匹配地址列表
         if data.get('true_address'):
@@ -439,24 +393,5 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
                 return data # 返回完整数据对象，包含截图路径
             else:
                 logger.debug("IP地址不匹配: {}", data['true_address'])
-                # 不匹配，FileCleaner 会定期清理，无需立即删除
-                # if screenshot_path and os.path.exists(screenshot_path):
-                #     try:
-                #         os.remove(screenshot_path)
-                #         logger.debug("IP不匹配，已删除截图: {}", screenshot_path)
-                #     except:
-                #         pass
                 return None
-        
-        # 2. 如果没提取到 IP，说明不满足转发条件（要么是需要IP的平台没取到，要么是不需要IP的平台没命中关键词）
-        # 注意：不需要IP的平台（如快手），只有在命中关键词时才转发（已在 run_keyword_check 处理）。
-        # 如果走到这里，说明关键词没命中，因此无论是什么平台，只要没 IP，都不应该转发。
-        
-        # 失败，FileCleaner 会定期清理，无需立即删除
-        # if screenshot_path and os.path.exists(screenshot_path):
-        #     try:
-        #         os.remove(screenshot_path)
-        #         logger.debug("未满足转发条件（无IP或关键词未命中），已删除截图: {}", screenshot_path)
-        #     except:
-        #         pass
         return None
