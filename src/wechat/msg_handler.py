@@ -60,23 +60,29 @@ async def process_video_task(url: str, dd_sender):
         allowed_sources = ['DouyinVideoClient', 'KuaishouVideoClient', 'RednoteVideoClient', 'WeiboVideoClient']
         
         for info in video_infos:
-            file_path = info.get('file_path', '')
+            # 兼容新版videodl对象(VideoInfo)和旧版字典
+            title = getattr(info, 'title', '') if hasattr(info, 'title') else (info.get('title', 'Unknown') if isinstance(info, dict) else 'Unknown')
+            source = getattr(info, 'source', '') if hasattr(info, 'source') else (info.get('source', '') if isinstance(info, dict) else '')
+            # 新版为 save_path, 旧版字典可能是 file_path
+            file_path = getattr(info, 'save_path', '') if hasattr(info, 'save_path') else (info.get('file_path', '') if isinstance(info, dict) else '')
             
             # 1. 检查格式是否为 mp4
-            if not file_path or not file_path.lower().endswith('.mp4'):
-                logger.info(f"跳过非mp4资源: {info.get('title', 'Unknown')} - {file_path}")
+            if not file_path or not str(file_path).lower().endswith('.mp4'):
+                logger.info(f"跳过非mp4资源: {title} - {file_path}")
                 continue
                 
-            # 2. 检查路径是否包含指定的来源关键字
-            # 注意：在 Windows 路径中，分隔符可能是 \，所以直接检查字符串包含即可
+            # 2. 检查路径是否包含指定的来源关键字，新版本直接检查 source 属性
             is_allowed_source = False
-            for source in allowed_sources:
-                if source in file_path:
-                    is_allowed_source = True
-                    break
+            if source in allowed_sources:
+                is_allowed_source = True
+            else:
+                for s in allowed_sources:
+                    if s in str(file_path) or s in str(source):
+                        is_allowed_source = True
+                        break
             
             if not is_allowed_source:
-                logger.debug(f"跳过非指定来源资源: {info.get('title', 'Unknown')} - {file_path}")
+                logger.debug(f"跳过非指定来源资源: {title} - {file_path} - {source}")
                 continue
                 
             filtered_video_infos.append(info)
@@ -87,11 +93,14 @@ async def process_video_task(url: str, dd_sender):
 
         # 4. 下载
         logger.info(f"正在下载 {len(filtered_video_infos)} 个视频...")
-        await loop.run_in_executor(None, client.download, filtered_video_infos)
+        downloaded_infos = await loop.run_in_executor(None, client.download, filtered_video_infos)
         
+        if downloaded_infos is None:
+            downloaded_infos = filtered_video_infos
+
         # 5. 收集下载后的文件路径并发送
-        for info in filtered_video_infos:
-            file_path = info.get('file_path')
+        for info in downloaded_infos:
+            file_path = getattr(info, 'save_path', '') if hasattr(info, 'save_path') else (info.get('file_path', '') if isinstance(info, dict) else '')
             if file_path and os.path.exists(file_path):
                 logger.info(f"视频下载完成，准备发送: {file_path}")
                 await dd_sender.send_video(file_path)

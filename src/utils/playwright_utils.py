@@ -41,6 +41,12 @@ class PlaywrightManager:
         # 记录当前启动模式
         PlaywrightManager._CURRENT_HEADLESS = headless
 
+        # ==================== 新增日志：打印启用方式 ====================
+        mode_str = "无头模式 (后台隐身)" if headless else "有头模式 (可见窗口)"
+        logger.info("--------------------------------------------------")
+        logger.info(f"▶ 准备启动 Playwright: 当前模式为 [{mode_str}]")
+        logger.info("--------------------------------------------------")
+
         if _GLOBAL_CONTEXT is not None:
             logger.info("Playwright Browser 已经启动，无需重复启动。")
             return
