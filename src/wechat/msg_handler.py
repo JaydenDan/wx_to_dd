@@ -187,7 +187,6 @@ async def async_process_message(msg, chat, dd_sender):
     """
     异步处理核心逻辑 (并行优化版)
     """
-    logger.info("========== 监听到 [{}] 消息, 内容: {}... ==========", msg.type, msg.content.replace(chr(10), ' ')[:100])
 
     # 消息预处理
     if msg.type == 'quote':
