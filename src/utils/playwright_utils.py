@@ -433,182 +433,177 @@ class PlaywrightIpChecker:
             except Exception as e:
                 logger.error("创建截图目录失败: {}", e)
 
-    async def process_any_url(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False) -> Optional[Dict[str, Any]]:
+    async def process_any_url(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False, retry_count: int = 0) -> Optional[Dict[str, Any]]:
         """
         统一入口：处理任意 URL，自动判断平台并分发
         :param url: 目标 URL
         :param force_screenshot_only: 强制仅截图模式（忽略 IP 获取）
         :param use_temp_file: 是否使用临时文件保存截图（用于发送后即弃的场景）
+        :param retry_count: 重试次数（内部使用） 
         """
         # 使用信号量控制并发
         async with PlaywrightManager.get_semaphore():
-            return await self._process_any_url_internal(url, force_screenshot_only, use_temp_file)
-
-    async def _process_any_url_internal(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False, retry_count: int = 0) -> Optional[Dict[str, Any]]:
-        """
-        内部实现逻辑
-        """
-        context = PlaywrightManager.get_context()
-        if context is None:
-            logger.warning("Playwright Context 未初始化，尝试自动启动...")
-            await PlaywrightManager.start(headless=True)
             context = PlaywrightManager.get_context()
             if context is None:
-                logger.error("无法启动 Context，任务终止。")
-                return None
+                logger.warning("Playwright Context 未初始化，尝试自动启动...")
+                await PlaywrightManager.start(headless=True)
+                context = PlaywrightManager.get_context()
+                if context is None:
+                    logger.error("无法启动 Context，任务终止。")
+                    return None
 
-        page = None
-        try:
+            page = None
             try:
-                page = await context.new_page()
-            except Exception as e:
-                # 捕获 TargetClosedError 或其他相关错误
-                if "closed" in str(e).lower() or "target" in str(e).lower():
-                    if retry_count < 1:
-                        logger.warning("检测到浏览器已关闭，尝试重启并重试任务...")
-                        await PlaywrightManager.stop()
-                        # 重启时 check_login=False，避免重新进行登录校验
-                        await PlaywrightManager.start(headless=True, check_login=False)
-                        # 递归重试一次
-                        return await self._process_any_url_internal(url, force_screenshot_only, use_temp_file, retry_count=1)
+                try:
+                    page = await context.new_page()
+                except Exception as e:
+                    # 捕获 TargetClosedError 或其他相关错误
+                    if "closed" in str(e).lower() or "target" in str(e).lower():
+                        if retry_count < 1:
+                            logger.warning("检测到浏览器已关闭，尝试重启并重试任务...")
+                            await PlaywrightManager.stop()
+                            # 重启时 check_login=False，避免重新进行登录校验
+                            await PlaywrightManager.start(headless=True, check_login=False)
+                            # 递归重试一次，释放信号量后重新进入
+                            return await self.process_any_url(url, force_screenshot_only, use_temp_file, retry_count=1)
+                        else:
+                            logger.error("浏览器重启后依然失败，放弃任务。")
+                            raise e
                     else:
-                        logger.error("浏览器重启后依然失败，放弃任务。")
                         raise e
-                else:
-                    raise e
 
-            logger.info("正在访问: {} (Force Screenshot: {})", url, force_screenshot_only)
-            
-            # 1. 访问 URL
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(1000)
-            except Exception as e:
-                logger.warning("页面加载可能不完整: {}", e)
-
-            # 2. 获取最终跳转后的 URL 和域名
-            final_url = page.url
-            logger.debug("最终 URL: {}", final_url)
-            
-            platform = "unknown"
-            
-            # 3. 域名匹配与策略分发
-            requires_ip = False
-            is_mobile = False
-            
-            # 检查是否需要移动端视口
-            if "mobile_screen" in PLATFORM_CONFIG:
-                for domain in PLATFORM_CONFIG["mobile_screen"]:
-                    if domain in final_url:
-                        is_mobile = True
-                        break
-            
-            if is_mobile:
-                logger.info("[{}] 切换至移动端视口 (430x932)", platform)
-                await page.set_viewport_size({"width": 430, "height": 932})
-            
-            # 如果强制仅截图，则跳过 IP 检查配置
-            if not force_screenshot_only:
-                # 检查是否需要 IP 获取
-                for domain in PLATFORM_CONFIG["ip_required"]:
-                    if domain in final_url:
-                        # 映射到内部平台标识
-                        if "xiaohongshu" in domain or "xhslink" in domain:
-                            platform = "xhs"
-                        elif "douyin" in domain:
-                            platform = "douyin"
-                        elif "weibo" in domain:
-                            platform = "weibo"
-                        requires_ip = True
-                        break
-            else:
-                logger.debug("已启用强制截图模式，跳过 IP 获取逻辑。")
-            
-            # 检查是否仅截图 (用于识别平台名称)
-            # 即使 requires_ip 为 True，这里也需要确认 platform 是否已被正确设置，
-            # 如果上面匹配到了，platform 就已经有值了。
-            # 如果上面没匹配到 (requires_ip=False)，或者 force_screenshot_only=True，我们需要再次尝试识别平台名称。
-            if platform == "unknown":
-                for domain in PLATFORM_CONFIG["screenshot_only"]:
-                    if domain in final_url:
-                        platform = domain.split(".")[0] # 如 kuaishou, toutiao, soulsmile
-                        break
+                logger.info("正在访问: {} (Force Screenshot: {})", url, force_screenshot_only)
                 
-                # 如果还是 unknown，再尝试匹配 ip_required 列表中的域名来获取平台名 (针对 force_screenshot_only=True 的情况)
-                if platform == "unknown":
-                     for domain in PLATFORM_CONFIG["ip_required"]:
+                # 1. 访问 URL
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(1000)
+                except Exception as e:
+                    logger.warning("页面加载可能不完整: {}", e)
+
+                # 2. 获取最终跳转后的 URL 和域名
+                final_url = page.url
+                logger.debug("最终 URL: {}", final_url)
+                
+                platform = "unknown"
+                
+                # 3. 域名匹配与策略分发
+                requires_ip = False
+                is_mobile = False
+                
+                # 检查是否需要移动端视口
+                if "mobile_screen" in PLATFORM_CONFIG:
+                    for domain in PLATFORM_CONFIG["mobile_screen"]:
                         if domain in final_url:
+                            is_mobile = True
+                            break
+                
+                if is_mobile:
+                    logger.info("[{}] 切换至移动端视口 (430x932)", platform)
+                    await page.set_viewport_size({"width": 430, "height": 932})
+                
+                # 如果强制仅截图，则跳过 IP 检查配置
+                if not force_screenshot_only:
+                    # 检查是否需要 IP 获取
+                    for domain in PLATFORM_CONFIG["ip_required"]:
+                        if domain in final_url:
+                            # 映射到内部平台标识
                             if "xiaohongshu" in domain or "xhslink" in domain:
                                 platform = "xhs"
                             elif "douyin" in domain:
                                 platform = "douyin"
                             elif "weibo" in domain:
                                 platform = "weibo"
+                            requires_ip = True
                             break
-            
-            # 如果是未知平台，默认只截图
-            if platform == "unknown":
-                logger.debug("未知平台链接，将仅执行截图: {}", final_url)
+                else:
+                    logger.debug("已启用强制截图模式，跳过 IP 获取逻辑。")
+                
+                # 检查是否仅截图 (用于识别平台名称)
+                # 即使 requires_ip 为 True，这里也需要确认 platform 是否已被正确设置，
+                # 如果上面匹配到了，platform 就已经有值了。
+                # 如果上面没匹配到 (requires_ip=False)，或者 force_screenshot_only=True，我们需要再次尝试识别平台名称。
+                if platform == "unknown":
+                    for domain in PLATFORM_CONFIG["screenshot_only"]:
+                        if domain in final_url:
+                            platform = domain.split(".")[0] # 如 kuaishou, toutiao, soulsmile
+                            break
+                    
+                    # 如果还是 unknown，再尝试匹配 ip_required 列表中的域名来获取平台名 (针对 force_screenshot_only=True 的情况)
+                    if platform == "unknown":
+                         for domain in PLATFORM_CONFIG["ip_required"]:
+                            if domain in final_url:
+                                if "xiaohongshu" in domain or "xhslink" in domain:
+                                    platform = "xhs"
+                                elif "douyin" in domain:
+                                    platform = "douyin"
+                                elif "weibo" in domain:
+                                    platform = "weibo"
+                                break
+                
+                # 如果是未知平台，默认只截图
+                if platform == "unknown":
+                    logger.debug("未知平台链接，将仅执行截图: {}", final_url)
 
-            # 4. 特殊处理：检测遮罩 (针对小红书等)
-            if platform == "xhs" and requires_ip:
-                 if await page.locator(".reds-mask").count() > 0 or await page.locator(".login-container").count() > 0:
-                     logger.warning("[{}] 检测到登录遮罩，可能登录态已失效！", platform)
+                # 4. 特殊处理：检测遮罩 (针对小红书等)
+                if platform == "xhs" and requires_ip:
+                     if await page.locator(".reds-mask").count() > 0 or await page.locator(".login-container").count() > 0:
+                         logger.warning("[{}] 检测到登录遮罩，可能登录态已失效！", platform)
 
-            # 4.5 等待加载
-            if SCREENSHOT_DELAY > 0:
-                logger.info("[{}] 截图前额外等待 {} 秒...", platform, SCREENSHOT_DELAY)
-                await asyncio.sleep(SCREENSHOT_DELAY)
+                # 4.5 等待加载
+                if SCREENSHOT_DELAY > 0:
+                    logger.info("[{}] 截图前额外等待 {} 秒...", platform, SCREENSHOT_DELAY)
+                    await asyncio.sleep(SCREENSHOT_DELAY)
 
-            # 5. 截图
-            if use_temp_file:
-                import tempfile
-                # 创建临时文件，不会自动删除，需要调用者处理，或者系统自动清理
-                # 使用 delete=False 确保文件存在，关闭后可读取
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                    filepath = tmp.name
-                logger.info("[{}] 使用临时截图文件: {}", platform, filepath)
-            else:
-                import uuid
-                # 使用 UUID 避免高并发下的文件名冲突
-                filename = f"{platform}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-                filepath = os.path.join(self.screenshot_dir, filename)
+                # 5. 截图
+                if use_temp_file:
+                    import tempfile
+                    # 创建临时文件，不会自动删除，需要调用者处理，或者系统自动清理
+                    # 使用 delete=False 确保文件存在，关闭后可读取
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                        filepath = tmp.name
+                    logger.info("[{}] 使用临时截图文件: {}", platform, filepath)
+                else:
+                    import uuid
+                    # 使用 UUID 避免高并发下的文件名冲突
+                    filename = f"{platform}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+                    filepath = os.path.join(self.screenshot_dir, filename)
 
-            try:
-                await page.screenshot(path=filepath, full_page=False)
-                if not use_temp_file:
-                    logger.info("[{}] 截图已保存: {}", platform, filepath)
+                try:
+                    await page.screenshot(path=filepath, full_page=False)
+                    if not use_temp_file:
+                        logger.info("[{}] 截图已保存: {}", platform, filepath)
+                except Exception as e:
+                    logger.error("[{}] 截图失败: {}", platform, e)
+                    # 如果截图失败且是临时文件，尝试清理
+                    if use_temp_file and os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                        except:
+                            pass
+                    filepath = None # 标记失败
+
+                # 6. 提取 IP (如果需要)
+                true_address = None
+                if requires_ip:
+                    true_address = await self._extract_ip(page, platform, final_url)
+                else:
+                    logger.info("[{}] 无需提取 IP。", platform)
+
+                return {
+                    "true_address": true_address,
+                    "screenshot_path": filepath,
+                    "url": url,
+                    "final_url": final_url,
+                    "platform": platform
+                }
+
             except Exception as e:
-                logger.error("[{}] 截图失败: {}", platform, e)
-                # 如果截图失败且是临时文件，尝试清理
-                if use_temp_file and os.path.exists(filepath):
-                    try:
-                        os.remove(filepath)
-                    except:
-                        pass
-                filepath = None # 标记失败
-
-            # 6. 提取 IP (如果需要)
-            true_address = None
-            if requires_ip:
-                true_address = await self._extract_ip(page, platform, final_url)
-            else:
-                logger.info("[{}] 无需提取 IP。", platform)
-
-            return {
-                "true_address": true_address,
-                "screenshot_path": filepath,
-                "url": url,
-                "final_url": final_url,
-                "platform": platform
-            }
-
-        except Exception as e:
-            logger.exception("任务处理异常: {}", e)
-            return None
-        finally:
-            if page:
-                await page.close()
+                logger.exception("任务处理异常: {}", e)
+                return None
+            finally:
+                if page:
+                    await page.close()
 
     # 保留旧接口以兼容（或者让它们直接调用新接口，但建议外部直接调 process_any_url）
     async def get_xhs_info(self, url: str) -> Optional[Dict[str, Any]]:

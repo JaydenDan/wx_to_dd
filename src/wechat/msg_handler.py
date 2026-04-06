@@ -9,6 +9,7 @@ from src.config import global_config
 from src.ding_talk.dd_hook import send_to_dd
 from src.utils.commons import timeit, extract_author
 from src.utils.deduplication import claim_url_if_not_processed, is_username_processed, release_claimed_url
+from src.utils.playwright_utils import PlaywrightIpChecker
 from src.utils.video_manager import video_manager
 
 # --------------------------------------------------------------------------------------
@@ -47,7 +48,7 @@ async def process_video_task(url: str, dd_sender):
             
         # 调试打印所有解析到的视频信息
         for idx, info in enumerate(video_infos):
-            logger.debug(f"Video Info [{idx}]: {info}")
+            logger.info(f"Video Info [{idx}]: {info}")
             
         # 3. 收集所有符合条件的 mp4 视频路径
         # 预先收集所有需要下载的任务，过滤非 mp4
@@ -63,7 +64,7 @@ async def process_video_task(url: str, dd_sender):
             
             # 1. 检查格式是否为 mp4
             if not file_path or not file_path.lower().endswith('.mp4'):
-                logger.debug(f"跳过非mp4资源: {info.get('title', 'Unknown')} - {file_path}")
+                logger.info(f"跳过非mp4资源: {info.get('title', 'Unknown')} - {file_path}")
                 continue
                 
             # 2. 检查路径是否包含指定的来源关键字
@@ -81,7 +82,7 @@ async def process_video_task(url: str, dd_sender):
             filtered_video_infos.append(info)
         
         if not filtered_video_infos:
-            logger.debug("没有找到有效的 MP4 视频资源（且来源合法），跳过下载。")
+            logger.info("没有找到有效的 MP4 视频资源（且来源合法），跳过下载。")
             return
 
         # 4. 下载
@@ -100,27 +101,27 @@ async def process_video_task(url: str, dd_sender):
     except Exception as e:
         logger.error(f"视频处理任务异常: {e}")
 
-async def run_keyword_check(msg, include_screenshot: bool = True) -> Optional[Tuple[str, Optional[str]]]:
+async def run_keyword_check(msg_type: str, msg_content: str, msg_quote_content: str, include_screenshot: bool = True) -> Optional[Tuple[str, Optional[str]]]:
     """
     执行关键词检查。
     如果匹配，返回 (处理好的消息文本, 截图路径)；否则返回 None。
     当 include_screenshot 为 False 时，仅组装文本，不阻塞等待截图。
     """
-    if check_keyword(msg):
+    if check_keyword(msg_type, msg_content, msg_quote_content):
         logger.info("✅ 规则匹配：关键词")
         # 引用消息和普通消息清理对象不同
-        content_to_clean = msg.quote_content if msg.type == 'quote' else msg.content
+        content_to_clean = msg_quote_content if msg_type == 'quote' else msg_content
         cleaned_msg = msg_cleaner(content_to_clean)
 
-        if msg.type == 'quote':
-            final_msg = msg_restructure(quote_content=cleaned_msg, msg_content=msg.content)
+        if msg_type == 'quote':
+            final_msg = msg_restructure(quote_content=cleaned_msg, msg_content=msg_content)
             logger.debug("引用消息处理完成，最终消息: {}", final_msg)
             # 引用消息：尝试从被引用的内容中提取 URL
-            source_content = msg.quote_content
+            source_content = msg_quote_content
         else:
             final_msg = msg_restructure(msg_content=cleaned_msg)
             # 文本消息：尝试从内容中提取 URL
-            source_content = msg.content
+            source_content = msg_content
             
         screenshot_path = None
         if include_screenshot:
@@ -128,7 +129,6 @@ async def run_keyword_check(msg, include_screenshot: bool = True) -> Optional[Tu
             if urls:
                 url = urls[0]
                 logger.info("🚀 关键词匹配成功，准备截图 URL: {}", url)
-                from src.utils.playwright_utils import PlaywrightIpChecker
                 checker = PlaywrightIpChecker()
                 # 强制截图模式，使用项目截图目录，便于清理器管理
                 data = await checker.process_any_url(url, force_screenshot_only=True, use_temp_file=False)
@@ -140,13 +140,13 @@ async def run_keyword_check(msg, include_screenshot: bool = True) -> Optional[Tu
     return None
 
 
-async def process_keyword_followup_task(msg, final_msg: str, dd_sender, video_url: Optional[str] = None):
+async def process_keyword_followup_task(msg_type: str, msg_content: str, msg_quote_content: str, final_msg: str, dd_sender, video_url: Optional[str] = None):
     """
     处理关键词命中后的后台任务。
     先补发文字加截图，再继续处理后续视频发送，保证发送顺序符合预期。
     """
     try:
-        keyword_result = await run_keyword_check(msg, include_screenshot=True)
+        keyword_result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=True)
         if keyword_result and dd_sender:
             _, img_path = keyword_result
             if img_path:
@@ -158,11 +158,11 @@ async def process_keyword_followup_task(msg, final_msg: str, dd_sender, video_ur
     except Exception as e:
         logger.error("关键词落查后台补发任务异常: {}", e)
 
-async def run_ip_check(msg) -> Optional[Tuple[str, Optional[str]]]:
+async def run_ip_check(msg_content: str) -> Optional[Tuple[str, Optional[str]]]:
     """
     执行IP检查。如果匹配，返回 (处理好的消息文本, 截图路径)；否则返回 None。
     """
-    result_data = await ip_should_sent(msg.content)
+    result_data = await ip_should_sent(msg_content)
     if result_data:
         # 根据返回数据判断是IP匹配还是仅截图平台
         if result_data.get('true_address'):
@@ -170,7 +170,7 @@ async def run_ip_check(msg) -> Optional[Tuple[str, Optional[str]]]:
         else:
             logger.info("✅ 规则匹配：特定平台截图（无需IP）")
             
-        cleaned_msg_text = msg_cleaner(msg.content)
+        cleaned_msg_text = msg_cleaner(msg_content)
         final_msg = msg_restructure(msg_content=cleaned_msg_text)
         
         # 从 result_data 中获取截图路径
@@ -183,20 +183,29 @@ async def run_ip_check(msg) -> Optional[Tuple[str, Optional[str]]]:
 # --------------------------------------------------------------------------------------
 
 @timeit(log_level="INFO")
-async def async_process_message(msg, chat, dd_sender):
+async def async_process_message(msg_data: dict, chat, dd_sender):
     """
     异步处理核心逻辑 (并行优化版)
     """
+    content_xml = msg_data.get("content_xml") or {}
+    msg_node = content_xml.get("msg") or {}
+    quote_title = msg_node.get("title") or (msg_node.get("appmsg") or {}).get("title")
+    quote_refer_content = (msg_node.get("refermsg") or {}).get("content") or (msg_node.get("appmsg") or {}).get("refermsg", {}).get("content")
+    real_content = msg_data.get("real_content")
+
+    msg_type = 'quote' if quote_title else 'text'
+    msg_content = str(quote_title) if quote_title else str(real_content)
+    msg_quote_content = str(quote_refer_content or "") if quote_title else ""
 
     # 消息预处理
-    if msg.type == 'quote':
-        if msg.quote_content == None: 
-            logger.warning("引用消息为 None: {}", msg.content)
+    if msg_type == 'quote':
+        if not msg_quote_content: 
+            logger.warning("引用消息内容为空: {}", msg_content)
             return
-        msg.quote_content = msg.quote_content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
-        msg.quote_content = msg_cleaner(msg.quote_content)
+        msg_quote_content = msg_quote_content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
+        msg_quote_content = msg_cleaner(msg_quote_content)
         # 如果是引用消息则直接判断关键词返回即可
-        result = await run_keyword_check(msg, include_screenshot=False)
+        result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=False)
         logger.debug("quote checked = {}", result)
         
         if result:
@@ -207,34 +216,30 @@ async def async_process_message(msg, chat, dd_sender):
                 await dd_sender.send(text)
             
             # 关键词命中后，先发纯文字，再在后台补发截图和后续视频
-            if dd_sender and msg.quote_content:
-                quote_url_match = global_config.URL_PATTERN.search(msg.quote_content)
+            if dd_sender and msg_quote_content:
+                quote_url_match = global_config.URL_PATTERN.search(msg_quote_content)
                 if quote_url_match:
                     video_url = quote_url_match.group(0)
-                    asyncio.create_task(process_keyword_followup_task(msg, text, dd_sender, video_url))
+                    asyncio.create_task(process_keyword_followup_task(msg_type, msg_content, msg_quote_content, text, dd_sender, video_url))
                 else:
-                    asyncio.create_task(process_keyword_followup_task(msg, text, dd_sender))
+                    asyncio.create_task(process_keyword_followup_task(msg_type, msg_content, msg_quote_content, text, dd_sender))
 
-            # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
         return
-    elif msg.type == 'text':
-        if msg.content == None: 
-            logger.warning("消息为 None: {}", msg.content)
+    elif msg_type == 'text':
+        if not msg_content: 
+            logger.warning("文本消息内容为空")
             return
-        msg.content = msg.content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
-        username = extract_author(msg.content)
-        msg.content = msg_cleaner(msg.content)
-    else:
-        logger.warning("未处理消息类型, type: {}", msg.type)
-        return
+        msg_content = msg_content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
+        username = extract_author(msg_content)
+        msg_content = msg_cleaner(msg_content)
 
     # 提前提取URL，用于去重
-    url_match = global_config.URL_PATTERN.search(msg.content)
+    url_match = global_config.URL_PATTERN.search(msg_content)
     url_string = url_match.group(0) if url_match else None
 
-    username_has_processed = await is_username_processed(username)
+    username_has_processed = await is_username_processed(username) if msg_type == 'text' else False
     url_claimed = False
-    if global_config.SYSTEM_ENV == 'prod' and msg.type == 'text':
+    if global_config.SYSTEM_ENV == 'prod' and msg_type == 'text':
         if url_string:
             url_claimed = await claim_url_if_not_processed(url_string)
             if not url_claimed:
@@ -244,30 +249,8 @@ async def async_process_message(msg, chat, dd_sender):
             logger.info("该 用户名 已被处理，跳过: {}", username)
             return
 
-    # 优化后的串行逻辑（避免并发导致重复截图）
-    
-    # 1. 优先进行关键词检查
-    # 关键词检查比较轻量（除非命中截图），且优先级较高
-    # 如果关键词命中，直接返回，不再进行 IP 检查
-    
-    # 将 run_keyword_check 拆分为两步：check 和 screenshot
-    # 但为了少改动，我们利用 run_keyword_check 内部逻辑：
-    # 它如果没命中关键词，返回 None，很快
-    # 如果命中了，它会去截图，这会比较慢
-    
-    # 现在的矛盾点是：run_keyword_check 内部做了截图，run_ip_check 内部也做了截图
-    # 如果我们想并行，就必须接受可能得重复请求（浪费资源）
-    # 如果我们想避免重复，就得串行，或者共享截图结果
-    
-    # 鉴于 Playwright 资源昂贵，建议改为串行：
-    # 先跑关键词检查 -> 命中 -> 结束
-    # 没命中 -> 跑 IP 检查 -> 命中 -> 结束
-    
-    # 但是，run_keyword_check 现在的实现是：命中关键词 -> 截图 -> 返回
-    # 如果我们想“预先”检查关键词而不截图，需要拆分函数
-    
     # 方案 A：简单串行
-    keyword_result = await run_keyword_check(msg, include_screenshot=True)
+    keyword_result = await run_keyword_check(msg_type, msg_content, msg_quote_content, include_screenshot=True)
     if keyword_result:
         logger.info("✅ 关键词检查命中，处理完成。")
         text, img_path = keyword_result
@@ -288,12 +271,12 @@ async def async_process_message(msg, chat, dd_sender):
             # 关键词检查已包含截图，直接处理后续视频
             asyncio.create_task(process_video_task(url_string, dd_sender))
 
-        # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
         return
 
     # 2. 如果关键词没命中，且有 URL，再进行 IP 检查
     if url_string:
-        ip_result = await run_ip_check(msg)
+        # IP 检查同样需要使用带有完整 URL 的原文
+        ip_result = await run_ip_check(original_content if msg_type == 'text' else msg_content)
         if ip_result:
             logger.info("✅ URL处理命中，处理完成。")
             text, img_path = ip_result
@@ -311,31 +294,22 @@ async def async_process_message(msg, chat, dd_sender):
             if url_string:
                 asyncio.create_task(process_video_task(url_string, dd_sender))
 
-            # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
             return
             
     if url_claimed and url_string:
         await release_claimed_url(url_string)
 
     logger.info("所有检查已完成，未匹配任何规则。")
-    # 如果到了这里，说明没有匹配成功，但是 run_ip_check 可能生成了截图
-    # 由于 run_ip_check 返回 None，我们无法直接获取 img_path
-    # 这是一个设计上的问题：process_any_url 生成了截图，但是 ip_should_sent 只返回 None 丢弃了所有信息
-    
-    # 解决方案：
-    # 1. 修改 run_ip_check 让它在不匹配时也返回截图路径以便清理（不优雅）
-    # 2. 或者在 PlaywrightIpChecker 中使用临时文件（use_temp_file=True），并依靠 Python 的 tempfile 机制清理（但 Windows 下 delete=False 需要手动删）
-    # 3. 最简单的：让 ip_should_sent 在判断不匹配时，主动清理生成的截图
     return
 
 
-def check_keyword(msg) -> bool:
-    is_quote_msg = msg.type == 'quote'
+def check_keyword(msg_type: str, msg_content: str, msg_quote_content: str) -> bool:
+    is_quote_msg = msg_type == 'quote'
 
     # ----------- 情况一：处理引用消息 -----------
     if is_quote_msg:
-        original_content = msg.quote_content
-        cite_msg = msg.content
+        original_content = msg_quote_content
+        cite_msg = msg_content
 
         logger.debug(
             "处理引用消息: [引用内容] " + original_content.replace('\n', ' ')[:100] + "... -> [回复] {}", cite_msg)
@@ -361,7 +335,7 @@ def check_keyword(msg) -> bool:
 
     # ----------- 情况二：处理普通文本消息 -----------
     else:
-        message = msg.content
+        message = msg_content
         logger.debug("处理普通文本消息: {}", message.replace("\n", " "))
 
         # 核心逻辑1: URL 校验, 判断消息内是否有 URL 链接
