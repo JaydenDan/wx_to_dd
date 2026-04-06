@@ -267,23 +267,26 @@ async def async_process_message(msg, chat, dd_sender):
     # 如果我们想“预先”检查关键词而不截图，需要拆分函数
     
     # 方案 A：简单串行
-    keyword_result = await run_keyword_check(msg, include_screenshot=False)
+    keyword_result = await run_keyword_check(msg, include_screenshot=True)
     if keyword_result:
         logger.info("✅ 关键词检查命中，处理完成。")
-        text, _ = keyword_result
+        text, img_path = keyword_result
         try:
             if dd_sender is None:
                 await send_to_dd(msg=text)
             else:
-                await dd_sender.send(text)
+                if img_path:
+                    await dd_sender.send_mixed(text, img_path)
+                else:
+                    await dd_sender.send(text)
         except Exception:
             if url_claimed and url_string:
                 await release_claimed_url(url_string)
             raise
         
         if dd_sender and url_string:
-            # 先发纯文字，再在后台补发截图，最后继续处理视频。
-            asyncio.create_task(process_keyword_followup_task(msg, text, dd_sender, url_string))
+            # 关键词检查已包含截图，直接处理后续视频
+            asyncio.create_task(process_video_task(url_string, dd_sender))
 
         # 截图文件现在由 FileCleaner 定期清理，此处不再立即删除
         return
