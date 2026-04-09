@@ -153,7 +153,7 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
         if not msg_quote_content: 
             logger.warning("引用消息内容为空: {}", msg_content)
             return
-        msg_quote_content = msg_quote_content.replace("https:// ", "https://").replace("http:// ", "https://").replace("http://", "https://")
+        msg_quote_content = msg_quote_content.replace("https:// ", "https://").replace("http:// ", "https://")
         
         # 如果是引用消息则直接判断关键词返回即可
         if check_keyword(msg_type, msg_content, msg_quote_content):

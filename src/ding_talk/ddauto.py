@@ -316,8 +316,6 @@ class DDAuto:
             self._activate_window()
 
             match_obj = global_config.URL_PATTERN.search(msg)
-            msg = msg.replace("https://", "https:// ").replace("http://", "http:// ")
-
             # 粘贴并发送
             pyperclip.copy(msg)
             # 点击输入框
