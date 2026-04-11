@@ -90,11 +90,6 @@ async def receive_message(request: Request):
     
     room_wxid = from_user_name if from_user_name.endswith("@chatroom") else ""
 
-    # 3. 过滤不关注的群聊
-    listen_room = global_config.WECHAT_LISTEN_ROOM_WXID or ""
-    if listen_room and room_wxid != listen_room:
-        return {"code": 0, "msg": "success"}
-
     # 4. 解析真实内容 (判断引用消息还是普通文本)
     content_xml = msg_data.get("content_xml") or {}
     msg_node = content_xml.get("msg") or {}
@@ -125,6 +120,11 @@ async def receive_message(request: Request):
     else:
         summary = str(real_content).replace("\n", " ")[:80]
         logger.info(f"[收到 {event_desc}] | 发送者: {sender} | 内容: {summary}")
+
+    # 3. 过滤不关注的群聊
+    listen_room = global_config.WECHAT_LISTEN_ROOM_WXID or ""
+    if listen_room and room_wxid != listen_room:
+        return {"code": 0, "msg": "success"}
 
     # 6. 将原始字典数据分发给业务逻辑
     dd_sender = getattr(request.app.state, "dd_sender", None)
