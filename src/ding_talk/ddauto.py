@@ -252,6 +252,9 @@ class DDAuto:
                     # 视频可能较大，粘贴后需要等待一下让客户端识别
                     time.sleep(global_config.VIDEO_PASTE_WAITING) 
                     self._press_enter()
+                    # 根据要求，在第一次回车后等待0.3秒，再次回车
+                    time.sleep(0.3)
+                    self._press_enter()
                     logger.info("✅ 视频发送指令已执行")
                 else:
                     logger.error("❌ 视频复制到剪贴板失败")
