@@ -146,6 +146,15 @@ class DDAuto:
         logger.debug(f"✅ 输入框点击坐标: ({x},{y})")
         self._click(x, y)
 
+    def _click_video_confirm_button(self):
+        left, top, _, _, width, height = self._get_window_rect()
+        relative_x = (width + 1) // 2 + 100
+        relative_y = height // 2 + 60
+        x = left + relative_x
+        y = top + relative_y
+        logger.debug(f"✅ 视频确认按钮点击坐标: 窗口内({relative_x},{relative_y}) 屏幕({x},{y})")
+        self._click(x, y)
+
     def _click(self, x, y):
         win32api.SetCursorPos((x, y))
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0)
@@ -249,12 +258,8 @@ class DDAuto:
                 # 复制并粘贴视频
                 if self._set_clipboard_files([video_path]):
                     self._paste()
-                    # 视频可能较大，粘贴后需要等待一下让客户端识别
-                    time.sleep(global_config.VIDEO_PASTE_WAITING) 
-                    self._press_enter()
-                    # 根据要求，在第一次回车后等待0.3秒，再次回车
-                    time.sleep(0.3)
-                    self._press_enter()
+                    time.sleep(0.2)
+                    self._click_video_confirm_button()
                     logger.info("✅ 视频发送指令已执行")
                 else:
                     logger.error("❌ 视频复制到剪贴板失败")
