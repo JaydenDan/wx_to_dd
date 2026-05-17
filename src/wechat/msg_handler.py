@@ -1,6 +1,8 @@
 # --- 所有正则表达式 (完整复制) ---
 import asyncio
 import os
+import time
+from datetime import datetime
 from typing import Optional, Tuple
 
 from loguru import logger
@@ -11,6 +13,37 @@ from src.utils.commons import timeit, extract_author
 from src.utils.deduplication import claim_url_if_not_processed, is_username_processed, release_claimed_url
 from src.utils.playwright_utils import PlaywrightIpChecker
 from src.utils.video_manager import video_manager
+
+
+def _set_video_info_path(info, file_path: str):
+    if hasattr(info, 'save_path'):
+        info.save_path = file_path
+    elif hasattr(info, 'file_path'):
+        info.file_path = file_path
+    elif isinstance(info, dict):
+        if 'save_path' in info:
+            info['save_path'] = file_path
+        else:
+            info['file_path'] = file_path
+
+
+def _rename_downloaded_video(file_path: str) -> str:
+    """
+    将已下载视频重命名为 yyyyMMddHHmmssSSS 格式，保留原目录和后缀。
+    """
+    directory = os.path.dirname(file_path)
+    extension = os.path.splitext(file_path)[1]
+
+    while True:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+        new_file_path = os.path.join(directory, f"{timestamp}{extension}")
+        if new_file_path == file_path:
+            return file_path
+        if not os.path.exists(new_file_path):
+            os.rename(file_path, new_file_path)
+            return new_file_path
+        time.sleep(0.001)
+
 
 # --------------------------------------------------------------------------------------
 # 步骤1：将关键词和IP检查分别封装成独立的异步函数
@@ -102,6 +135,9 @@ async def process_video_task(url: str, dd_sender):
         for info in downloaded_infos:
             file_path = getattr(info, 'save_path', '') if hasattr(info, 'save_path') else (info.get('file_path', '') if isinstance(info, dict) else '')
             if file_path and os.path.exists(file_path):
+                renamed_file_path = _rename_downloaded_video(file_path)
+                _set_video_info_path(info, renamed_file_path)
+                file_path = renamed_file_path
                 logger.info(f"视频下载完成，准备发送: {file_path}")
                 await dd_sender.send_video(file_path)
             else:
