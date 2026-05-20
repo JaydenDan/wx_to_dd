@@ -246,6 +246,9 @@ class DDAuto:
         if not video_path or not os.path.exists(video_path):
             logger.warning(f"视频文件不存在: {video_path}")
             return
+        if os.path.getsize(video_path) == 0:
+            logger.warning(f"视频文件大小为0KB，跳过发送: {os.path.basename(video_path)}")
+            return
 
         async with self.lock:
             logger.info(f"正在发送视频: {video_path}")
