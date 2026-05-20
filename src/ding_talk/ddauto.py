@@ -260,6 +260,8 @@ class DDAuto:
                     self._paste()
                     time.sleep(0.2)
                     self._click_video_confirm_button()
+                    time.sleep(0.2)
+                    self._press_enter()
                     logger.info("✅ 视频发送指令已执行")
                 else:
                     logger.error("❌ 视频复制到剪贴板失败")
