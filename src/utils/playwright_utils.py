@@ -729,8 +729,8 @@ class PlaywrightIpChecker:
 
             elif platform == "douyin":
                 # 策略: 必须去用户主页
-                # 用户提供的两种 Full XPath
-                xpath_user_link_v1 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/div/div/div[2]/div/div[1]/div[1]/div/a/span/img'
+                # 用户提供的两种 Full XPath 
+                xpath_user_link_v1 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/div/div/main/div[2]/div[1]/div[1]/div/a/span/img'
                 xpath_user_link_v2 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/main/div[2]/div[1]/div[1]/div/a/span/img'
                 
                 try:
@@ -781,7 +781,7 @@ class PlaywrightIpChecker:
                             # 在新页面查找IP
                             # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
                             # 格式: "IP属地：广东"
-                            xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]'
+                            xpath_profile_ip = '//*[@id="user_detail_element"]/div/div[2]/div/div[1]/div[2]/p/span[2]'
                             if await new_page.locator(xpath_profile_ip).is_visible(timeout=5000):
                                 text = await new_page.locator(xpath_profile_ip).inner_text()
                                 if "：" in text:
@@ -830,9 +830,9 @@ if __name__ == "__main__":
         
         # 测试 URL (请填入真实链接)
         test_cases = [
-            ("xhs", "https://www.xiaohongshu.com/discovery/item/697d9456000000000e03fa2e?source=webshare&xhsshare=pc_web&xsec_token=ABF66cmefbqZ08OaTmolIxfyuLZ25qZ5rbTEyEhefTx-o=&xsec_source=pc_share"), 
-            ("weibo", "https://weibo.com/5669907032/PAla4hPI9"),
-            ("douyin", "https://www.douyin.com/video/7527531787717037370"),
+            # ("xhs", "https://www.xiaohongshu.com/discovery/item/697d9456000000000e03fa2e?source=webshare&xhsshare=pc_web&xsec_token=ABF66cmefbqZ08OaTmolIxfyuLZ25qZ5rbTEyEhefTx-o=&xsec_source=pc_share"), 
+            # ("weibo", "https://weibo.com/5669907032/PAla4hPI9"),
+            ("douyin", "https://www.douyin.com/video/7664953439391209702"),
         ]
         
         # 只是为了演示，这里使用 gather 并发执行
