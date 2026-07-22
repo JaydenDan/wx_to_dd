@@ -729,9 +729,9 @@ class PlaywrightIpChecker:
 
             elif platform == "douyin":
                 # 策略: 必须去用户主页
-                # 用户提供的两种 Full XPath 
+                # 用户提供的两种 Full XPath  
                 xpath_user_link_v1 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/div/div/main/div[2]/div[1]/div[1]/div/a/span/img'
-                xpath_user_link_v2 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/main/div[2]/div[1]/div[1]/div/a/span/img'
+                xpath_user_link_v2 = 'xpath=/html/body/div[2]/div[1]/div[4]/div[2]/div/div/div/div/div[2]/div/div[1]/div[1]/div/a/span/img'
                 
                 try:
                     # 抖音点击可能会打开新页面，需要处理
@@ -832,7 +832,7 @@ if __name__ == "__main__":
         test_cases = [
             # ("xhs", "https://www.xiaohongshu.com/discovery/item/697d9456000000000e03fa2e?source=webshare&xhsshare=pc_web&xsec_token=ABF66cmefbqZ08OaTmolIxfyuLZ25qZ5rbTEyEhefTx-o=&xsec_source=pc_share"), 
             # ("weibo", "https://weibo.com/5669907032/PAla4hPI9"),
-            ("douyin", "https://www.douyin.com/video/7664953439391209702"),
+            ("douyin", "https://www.iesdouyin.com/share/video/7665215768238012020#ocr"),
         ]
         
         # 只是为了演示，这里使用 gather 并发执行
