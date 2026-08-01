@@ -68,8 +68,8 @@ async def process_video_task(url: str, dd_sender):
         loop = asyncio.get_running_loop()
         
         # 1. 解析
-        # parsefromurl 通常很快，但也可能涉及网络请求
-        video_infos = await loop.run_in_executor(None, client.parsefromurl, url)
+        # 平台解析通常很快，但也可能涉及网络请求
+        video_infos = await loop.run_in_executor(None, video_manager.parse_video_url, url)
         if not video_infos:
             logger.warning(f"无法解析视频 URL: {url}")
             return
@@ -410,7 +410,7 @@ async def ip_should_sent(msg_content) -> Optional[dict]:
     返回：如果匹配成功，返回包含信息的字典；如果不匹配，返回 None
     """
     # 关键词检查保留，作为快速过滤器
-    keywords = ["xhs", "douyin", "weibo", "xiaohongshu", "kuaishou", "toutiao"]
+    keywords = ["xhs", "xhslink.cn", "douyin", "weibo", "xiaohongshu", "kuaishou", "toutiao"]
     if any(keyword in msg_content for keyword in keywords):
         logger.debug("触发 [IP检测] 逻辑, msg: {}", msg_content.replace("\n", " ")[:100])
         # 尝试提取 URL

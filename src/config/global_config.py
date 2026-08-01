@@ -20,7 +20,19 @@ DINGTALK_SEND_METHOD = os.getenv("DINGTALK_SEND_METHOD")
 DINGTALK_STANDBY = os.getenv("DINGTALK_STANDBY", "0") # 默认 0
 SYSTEM_ENV = os.getenv("SYSTEM_ENV")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+# Playwright 浏览器模式：true=无头，false=有头（显示浏览器窗口）。
+PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 SCREENSHOT_DELAY = float(os.getenv("SCREENSHOT_DELAY", "0.5"))
+# 抖音/小红书动态媒体的最大等待时间。页面在此时间内没有出现可用媒体时，
+# 按内容不可访问处理，避免网络异常时任务无限等待。
+MEDIA_READY_TIMEOUT = float(os.getenv("MEDIA_READY_TIMEOUT", "20"))
+# 媒体就绪状态轮询间隔；不使用固定截图延时。
+MEDIA_READY_POLL_INTERVAL = max(0.05, float(os.getenv("MEDIA_READY_POLL_INTERVAL", "0.15")))
 TEXT_PASTE_WAITING = float(os.getenv("TEXT_PASTE_WAITING", "0.1"))  
 SCREENSHOT_PASTE_WAITING = float(os.getenv("SCREENSHOT_PASTE_WAITING", "0.6"))
 VIDEO_PASTE_WAITING = float(os.getenv("VIDEO_PASTE_WAITING", "2"))
@@ -62,7 +74,8 @@ PLATFORM_CONFIG = {
         "xiaohongshu.com",
         "douyin.com",
         "weibo.com",
-        "xhslink.com"
+        "xhslink.com",
+        "xhslink.cn"
     ],
     # 仅需要截图的平台
     "screenshot_only": [

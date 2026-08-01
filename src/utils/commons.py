@@ -74,7 +74,7 @@ def extract_author(msg: str) -> str:
     msg = msg.strip()
 
     # 优先检查消息中是否包含平台的关键词
-    if 'xhslink.com' in msg or '小红书' in msg:
+    if 'xhslink.com' in msg or 'xhslink.cn' in msg or '小红书' in msg:
         # 小红书格式: 查找“发布了一篇...”前面的非空字符串
         # 例子: "... 38 小红薯663296B1发布了一篇..." -> 提取 "小红薯663296B1"
         match = re.search(r'(\S+)\s*发布了一篇小红书笔记', msg)

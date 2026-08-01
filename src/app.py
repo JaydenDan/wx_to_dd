@@ -41,7 +41,10 @@ async def lifespan(app: FastAPI):
     from src.utils.playwright_utils import PlaywrightManager
 
     logger.info("正在初始化 Playwright 浏览器环境...")
-    await PlaywrightManager.start(headless=True, check_login=True)
+    await PlaywrightManager.start(
+        headless=global_config.PLAYWRIGHT_HEADLESS,
+        check_login=True,
+    )
     app.state.playwright_manager = PlaywrightManager
 
     app.state.dd_sender = build_dd_sender()
