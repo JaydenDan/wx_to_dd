@@ -15,16 +15,151 @@ from src.config.global_config import (
     PLATFORM_CONFIG,
     SCREENSHOT_DELAY,
 )
-from playwright.async_api import async_playwright, Page, Browser, Playwright, BrowserContext
+from playwright.async_api import async_playwright, Page, Playwright, BrowserContext
 from loguru import logger
 
 # 全局变量存储 Playwright 和 Browser 实例
 _GLOBAL_PLAYWRIGHT: Optional[Playwright] = None
-_GLOBAL_BROWSER: Optional[Browser] = None
 # 新增：全局 BrowserContext 用于持久化存储 Cookies
 _GLOBAL_CONTEXT: Optional[BrowserContext] = None
 # 新增：全局信号量控制并发
 _GLOBAL_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+GUEST_PLATFORM_COOKIE_DOMAINS = re.compile(
+    r"(^|\.)(douyin\.com|iesdouyin\.com|xiaohongshu\.com|xhslink\.com|xhslink\.cn)$",
+    re.IGNORECASE,
+)
+
+LOGIN_OVERLAY_GUARD_SCRIPT = r"""
+(() => {
+    const installGuard = () => {
+        if (window.__wxToDdLoginOverlayGuardInstalled) return;
+        if (!document.documentElement) {
+            setTimeout(installGuard, 0);
+            return;
+        }
+
+        const hostname = location.hostname.toLowerCase();
+        const isDouyin = /(^|\.)douyin\.com$/.test(hostname) ||
+            /(^|\.)iesdouyin\.com$/.test(hostname);
+        const isXhs = /(^|\.)xiaohongshu\.com$/.test(hostname) ||
+            /(^|\.)xhslink\.com$/.test(hostname) ||
+            /(^|\.)xhslink\.cn$/.test(hostname);
+        if (!isDouyin && !isXhs) return;
+
+        window.__wxToDdLoginOverlayGuardInstalled = true;
+        window.__wxToDdLoginOverlayHandledCount = 0;
+        window.__wxToDdLoginOverlayReportedCount = 0;
+
+        const ensureBlockingStyle = () => {
+            if (document.getElementById('wx-to-dd-login-overlay-guard')) return;
+            const style = document.createElement('style');
+            style.id = 'wx-to-dd-login-overlay-guard';
+            style.textContent = `
+                [id^="login-full-panel-"] {
+                    display: none !important;
+                    visibility: hidden !important;
+                    pointer-events: none !important;
+                }
+                .reds-modal.login-modal, .login-modal {
+                    display: none !important;
+                    visibility: hidden !important;
+                    pointer-events: none !important;
+                }
+                html:has(.login-modal) .reds-mask {
+                    display: none !important;
+                    pointer-events: none !important;
+                }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+        };
+
+        const clickClose = (container, selector) => {
+            const closeIcon = container.querySelector(selector);
+            if (!closeIcon) return;
+            const clickTarget = closeIcon.closest('button, [role="button"], div') || closeIcon;
+            try {
+                clickTarget.click();
+            } catch (_) {
+                // DOM removal below remains the fallback.
+            }
+        };
+
+        const closeLoginOverlays = () => {
+            let handled = 0;
+
+            if (isDouyin) {
+                const panels = [...document.querySelectorAll('[id^="login-full-panel-"]')]
+                    .filter(panel =>
+                        panel.querySelector('#douyin-login-new-id, #login-panel-new') ||
+                        (panel.textContent || '').includes('登录后')
+                    );
+                for (const panel of panels) {
+                    const portal = panel.closest('.semi-portal');
+                    clickClose(
+                        panel,
+                        'svg[width="37"][height="36"], svg[width="36"][height="36"], [aria-label*="关闭"]'
+                    );
+                    const target = portal || panel;
+                    if (target.isConnected) target.remove();
+                    handled += 1;
+                }
+            }
+
+            if (isXhs) {
+                const modals = [...document.querySelectorAll('.reds-modal.login-modal, .login-modal')];
+                for (const modal of modals) {
+                    clickClose(modal, '.close-button, [aria-label*="关闭"]');
+                    if (modal.isConnected) modal.remove();
+                    handled += 1;
+                }
+                if (handled > 0) {
+                    document.querySelectorAll('.reds-mask[aria-label="弹窗遮罩"], .reds-mask')
+                        .forEach(mask => mask.remove());
+                    document.documentElement.classList.remove('reds-lock-scroll');
+                    document.body?.classList.remove('reds-lock-scroll');
+                    if (document.documentElement.style.overflow === 'hidden') {
+                        document.documentElement.style.removeProperty('overflow');
+                    }
+                    if (document.body?.style.overflow === 'hidden') {
+                        document.body.style.removeProperty('overflow');
+                    }
+                }
+            }
+
+            window.__wxToDdLoginOverlayHandledCount += handled;
+            return handled;
+        };
+
+        window.__wxToDdCloseLoginOverlays = closeLoginOverlays;
+        window.__wxToDdConsumeLoginOverlayCount = () => {
+            closeLoginOverlays();
+            const total = window.__wxToDdLoginOverlayHandledCount;
+            const delta = total - window.__wxToDdLoginOverlayReportedCount;
+            window.__wxToDdLoginOverlayReportedCount = total;
+            return delta;
+        };
+
+        let scheduled = false;
+        const scheduleClose = () => {
+            if (scheduled) return;
+            scheduled = true;
+            queueMicrotask(() => {
+                scheduled = false;
+                ensureBlockingStyle();
+                closeLoginOverlays();
+            });
+        };
+
+        ensureBlockingStyle();
+        closeLoginOverlays();
+        const observer = new MutationObserver(scheduleClose);
+        observer.observe(document.documentElement, {childList: true, subtree: true});
+    };
+
+    installGuard();
+})();
+"""
 
 class PlaywrightManager:
     """
@@ -41,9 +176,9 @@ class PlaywrightManager:
         """
         启动 Playwright Browser
         :param headless: 是否使用无头模式
-        :param check_login: 是否在启动后检查登录状态
+        :param check_login: 是否检查仍需人工验证的平台；抖音和小红书始终使用游客模式
         """
-        global _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER, _GLOBAL_CONTEXT, _GLOBAL_SEMAPHORE
+        global _GLOBAL_PLAYWRIGHT, _GLOBAL_CONTEXT, _GLOBAL_SEMAPHORE
 
         if headless is None:
             headless = PLAYWRIGHT_HEADLESS
@@ -69,7 +204,7 @@ class PlaywrightManager:
         try:
             _GLOBAL_PLAYWRIGHT = await async_playwright().start()
             
-            # 使用 launch_persistent_context 来持久化存储登录状态
+            # 复用浏览器配置目录；抖音和小红书账号 Cookie 会在启动时清除。
             if not os.path.exists(PlaywrightManager.USER_DATA_DIR):
                 os.makedirs(PlaywrightManager.USER_DATA_DIR)
                 
@@ -92,14 +227,12 @@ class PlaywrightManager:
                     get: () => undefined
                 });
             """)
+            await _GLOBAL_CONTEXT.add_init_script(LOGIN_OVERLAY_GUARD_SCRIPT)
+            await _GLOBAL_CONTEXT.clear_cookies(domain=GUEST_PLATFORM_COOKIE_DOMAINS)
+            logger.info("抖音和小红书已启用游客模式，不加载账号登录态。")
             
             # 设置默认超时时间
             _GLOBAL_CONTEXT.set_default_timeout(30000)
-            
-            # 这里为了兼容旧代码的 Browser 概念，我们虽然有了 Context，但还是保留 Browser 变量引用的概念
-            # launch_persistent_context 返回的是 Context，它没有 .new_context() 方法
-            # 所以后续的并发逻辑需要稍微调整：直接使用 pages，或者如果需要隔离，可以使用 new_page()
-            # 注意：Persistent Context 不能创建子 Context，所以所有页面共享 Cookie，正好符合登录态共享的需求
             
             logger.info("Playwright Browser (Persistent Context) 启动成功！")
             
@@ -113,15 +246,13 @@ class PlaywrightManager:
     @staticmethod
     async def check_login_status():
         """
-        检查关键平台的登录状态，如果没有登录，则弹出窗口让用户登录
+        检查仍需要人工验证的平台。抖音和小红书不参与登录检查。
         """
         global _GLOBAL_CONTEXT
         if not _GLOBAL_CONTEXT:
             return
 
         platforms_to_check = {
-            "douyin": "https://www.douyin.com/",
-            "xhs": "https://www.xiaohongshu.com/",
             "kuaishou": "https://c.kuaishou.com/fw/photo/3xu8bwer63hrre2"
         }
         
@@ -134,48 +265,7 @@ class PlaywrightManager:
                 
                 is_logged_in = False
                 
-                # 简单的登录判断逻辑 (根据页面元素判断，需要根据实际情况调整)
-                if name == "douyin":
-                    # 抖音已登录通常会有头像或特定的个人中心入口
-                    # 这是一个假设的选择器，实际需要确认
-                    if await page.locator(".avatar-component").count() > 0 or await page.locator("div[data-e2e='user-info']").count() > 0: 
-                        is_logged_in = True
-                    # 也可以判断是否有登录按钮，如果有则未登录
-                    elif await page.locator("button:has-text('登录')").count() > 0:
-                        is_logged_in = False
-                    else:
-                        # 尝试通过 Cookie 判断
-                        cookies = await _GLOBAL_CONTEXT.cookies(url)
-                        for cookie in cookies:
-                            if cookie['name'] == 'sessionid' or cookie['name'] == 'passport_csrf_token': # 示例 Cookie 名
-                                is_logged_in = True
-                                break
-                                
-                elif name == "xhs":
-                    # 小红书判断逻辑
-                    # 延长等待时间，确保页面元素加载
-                    try:
-                        # 优先等待遮罩或登录弹窗
-                        await page.wait_for_selector(".reds-mask, .login-container, text='我'", timeout=5000)
-                    except:
-                        pass
-                        
-                    # 1. 优先检测遮罩层/登录弹窗 -> 绝对未登录
-                    if (await page.locator(".reds-mask").count() > 0 or 
-                        await page.locator(".login-container").count() > 0):
-                        is_logged_in = False
-                        logger.warning("[xhs] 检测到登录遮罩/弹窗，判定为未登录。")
-                    
-                    # 2. 反向检测: 如果有显著的登录按钮 -> 未登录
-                    elif await page.locator("button:has-text('登录')").count() > 0:
-                         is_logged_in = False
-                         
-                    # 3. 正向检测: 只有在没有遮罩且有特征元素时，才判定为已登录
-                    elif (await page.locator("text='我'").count() > 0 or 
-                          await page.locator(".reds-icon-bell").count() > 0): 
-                        is_logged_in = True
-
-                elif name == "kuaishou":
+                if name == "kuaishou":
                     # 快手主要检查是否有滑块验证码
                     try:
                         # 延迟1秒检测，等待验证码加载
@@ -270,6 +360,10 @@ class PlaywrightManager:
         执行手动登录流程：关闭当前无头模式，重启为有头模式，等待用户登录
         """
         global _GLOBAL_CONTEXT, _GLOBAL_PLAYWRIGHT
+
+        if platform_name in {"douyin", "xhs"}:
+            logger.info("[{}] 已配置为游客模式，跳过人工登录。", platform_name)
+            return
         
         # 检查当前是否已经是 有头模式
         is_headless = PlaywrightManager._CURRENT_HEADLESS
@@ -325,36 +419,7 @@ class PlaywrightManager:
             page = login_page 
             
             try:
-                # 复用上面的检查逻辑
-                if platform_name == "douyin":
-                    if await page.locator(".avatar-component").count() > 0 or await page.locator("div[data-e2e='user-info']").count() > 0:
-                         is_logged_in = True
-                    elif await page.locator("button:has-text('登录')").count() == 0:
-                         # 简单的反向检查：没有登录按钮了，可能就登录了，或者页面变了
-                         # 这里可以加更严格的 Cookie 检查
-                         cookies = await _GLOBAL_CONTEXT.cookies(url)
-                         for cookie in cookies:
-                            if cookie['name'] == 'sessionid':
-                                is_logged_in = True
-                                break
-
-                elif platform_name == "xhs":
-                     # 延长等待时间
-                     try:
-                         await page.wait_for_selector(".reds-mask, .login-container, text='我'", timeout=2000)
-                     except:
-                         pass
-
-                     if (await page.locator(".reds-mask").count() > 0 or 
-                         await page.locator(".login-container").count() > 0):
-                         is_logged_in = False
-                     elif await page.locator("button:has-text('登录')").count() > 0:
-                         is_logged_in = False
-                     elif (await page.locator("text='我'").count() > 0 or 
-                          await page.locator(".reds-icon-bell").count() > 0):
-                        is_logged_in = True
-
-                elif platform_name == "kuaishou":
+                if platform_name == "kuaishou":
                      # 快手：只要验证码消失了，就算成功
                      has_captcha = False
                      if await page.locator("text='向右拖动滑块填充拼图'").count() > 0:
@@ -448,6 +513,22 @@ class PlaywrightIpChecker:
                 logger.info("创建截图目录: {}", self.screenshot_dir)
             except Exception as e:
                 logger.error("创建截图目录失败: {}", e)
+
+    async def _dismiss_login_overlay(self, page: Page, platform: str) -> int:
+        if platform not in {"douyin", "xhs"}:
+            return 0
+
+        try:
+            await page.evaluate(LOGIN_OVERLAY_GUARD_SCRIPT)
+            handled = await page.evaluate(
+                "() => window.__wxToDdConsumeLoginOverlayCount?.() || 0"
+            )
+            if handled:
+                logger.info("[{}] 已自动关闭登录弹窗并清理遮罩。", platform)
+            return int(handled)
+        except Exception as exc:
+            logger.debug("[{}] 页面跳转期间暂时无法清理登录弹窗: {}", platform, exc)
+            return 0
 
     async def _inspect_content_state(self, page: Page, platform: str) -> Dict[str, Any]:
         """Inspect dynamic page content without relying on a fixed sleep.
@@ -686,6 +767,7 @@ class PlaywrightIpChecker:
         deadline = time.monotonic() + max(0.0, MEDIA_READY_TIMEOUT)
         valid_sample_streak = 0
         while True:
+            await self._dismiss_login_overlay(page, platform)
             state = await self._inspect_content_state(page, platform)
             status = state.get("status")
             if status == "lost":
@@ -840,14 +922,14 @@ class PlaywrightIpChecker:
                     return None
 
                 # 4. 特殊处理：检测遮罩 (针对小红书等)
-                if platform == "xhs" and requires_ip:
-                     if await page.locator(".reds-mask").count() > 0 or await page.locator(".login-container").count() > 0:
-                         logger.warning("[{}] 检测到登录遮罩，可能登录态已失效！", platform)
+                if platform in {"douyin", "xhs"}:
+                    await self._dismiss_login_overlay(page, platform)
 
                 # 4.5 动态媒体使用真实就绪信号；其他平台保留原有额外等待。
                 if platform in {"douyin", "xhs"}:
                     if not await self._wait_for_content_ready(page, platform, url):
                         return None
+                    await self._dismiss_login_overlay(page, platform)
                 elif SCREENSHOT_DELAY > 0:
                     logger.info("[{}] 截图前额外等待 {} 秒...", platform, SCREENSHOT_DELAY)
                     await asyncio.sleep(SCREENSHOT_DELAY)
@@ -921,6 +1003,7 @@ class PlaywrightIpChecker:
         ip_address = None
         
         try:
+            await self._dismiss_login_overlay(page, platform)
             if platform == "xhs":
                 # 策略1: 作品页直接获取
                 # 尝试多个可能的选择器位置
@@ -960,6 +1043,7 @@ class PlaywrightIpChecker:
                     await page.click(xpath_user_link)
                     await page.wait_for_load_state("domcontentloaded")
                     await page.wait_for_timeout(2000) # 等待渲染
+                    await self._dismiss_login_overlay(page, platform)
 
                     # 主页IP: //*[@id="userPageContainer"]/div[1]/div/div[2]/div[1]/div[1]/div[2]/div[2]/span[2]
                     # 格式: " IP属地：吉林"
@@ -1068,6 +1152,7 @@ class PlaywrightIpChecker:
                             new_page = await popup_info.value
                             await new_page.wait_for_load_state("domcontentloaded")
                             await new_page.wait_for_timeout(2000)
+                            await self._dismiss_login_overlay(new_page, platform)
                             
                             # 在新页面查找IP
                             # 主页IP: //*[@id="user_detail_element"]/div/div[2]/div[2]/p/span[2]
