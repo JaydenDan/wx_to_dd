@@ -1,5 +1,4 @@
 import asyncio
-from io import BytesIO
 import os
 import sys
 import time
@@ -8,18 +7,13 @@ from typing import Optional, Dict, Any
 
 # 将项目根目录添加到 sys.path，解决模块导入问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.config.global_config import (
-    MEDIA_READY_POLL_INTERVAL,
-    MEDIA_READY_TIMEOUT,
-    PLAYWRIGHT_HEADLESS,
-    PLATFORM_CONFIG,
-    SCREENSHOT_DELAY,
-)
-from playwright.async_api import async_playwright, Page, Playwright, BrowserContext
+from src.config.global_config import PLAYWRIGHT_HEADLESS, PLATFORM_CONFIG, SCREENSHOT_DELAY
+from playwright.async_api import async_playwright, Page, Browser, Playwright, BrowserContext
 from loguru import logger
 
 # 全局变量存储 Playwright 和 Browser 实例
 _GLOBAL_PLAYWRIGHT: Optional[Playwright] = None
+_GLOBAL_BROWSER: Optional[Browser] = None
 # 新增：全局 BrowserContext 用于持久化存储 Cookies
 _GLOBAL_CONTEXT: Optional[BrowserContext] = None
 # 新增：全局信号量控制并发
@@ -176,9 +170,9 @@ class PlaywrightManager:
         """
         启动 Playwright Browser
         :param headless: 是否使用无头模式
-        :param check_login: 是否检查仍需人工验证的平台；抖音和小红书始终使用游客模式
+        :param check_login: 是否检查仍需要人工验证的平台；抖音和小红书始终使用游客模式
         """
-        global _GLOBAL_PLAYWRIGHT, _GLOBAL_CONTEXT, _GLOBAL_SEMAPHORE
+        global _GLOBAL_PLAYWRIGHT, _GLOBAL_BROWSER, _GLOBAL_CONTEXT, _GLOBAL_SEMAPHORE
 
         if headless is None:
             headless = PLAYWRIGHT_HEADLESS
@@ -204,7 +198,7 @@ class PlaywrightManager:
         try:
             _GLOBAL_PLAYWRIGHT = await async_playwright().start()
             
-            # 复用浏览器配置目录；抖音和小红书账号 Cookie 会在启动时清除。
+            # 使用 launch_persistent_context 来持久化存储登录状态
             if not os.path.exists(PlaywrightManager.USER_DATA_DIR):
                 os.makedirs(PlaywrightManager.USER_DATA_DIR)
                 
@@ -234,6 +228,11 @@ class PlaywrightManager:
             # 设置默认超时时间
             _GLOBAL_CONTEXT.set_default_timeout(30000)
             
+            # 这里为了兼容旧代码的 Browser 概念，我们虽然有了 Context，但还是保留 Browser 变量引用的概念
+            # launch_persistent_context 返回的是 Context，它没有 .new_context() 方法
+            # 所以后续的并发逻辑需要稍微调整：直接使用 pages，或者如果需要隔离，可以使用 new_page()
+            # 注意：Persistent Context 不能创建子 Context，所以所有页面共享 Cookie，正好符合登录态共享的需求
+
             logger.info("Playwright Browser (Persistent Context) 启动成功！")
             
             # 检查登录状态
@@ -265,6 +264,7 @@ class PlaywrightManager:
                 
                 is_logged_in = False
                 
+                # 仅对仍需要人工验证的平台执行登录判断。
                 if name == "kuaishou":
                     # 快手主要检查是否有滑块验证码
                     try:
@@ -419,6 +419,7 @@ class PlaywrightManager:
             page = login_page 
             
             try:
+                # 快手仍使用人工验证；抖音和小红书由游客模式处理。
                 if platform_name == "kuaishou":
                      # 快手：只要验证码消失了，就算成功
                      has_captcha = False
@@ -530,271 +531,6 @@ class PlaywrightIpChecker:
             logger.debug("[{}] 页面跳转期间暂时无法清理登录弹窗: {}", platform, exc)
             return 0
 
-    async def _inspect_content_state(self, page: Page, platform: str) -> Dict[str, Any]:
-        """Inspect dynamic page content without relying on a fixed sleep.
-
-        Douyin renders the active player on a cross-origin canvas in some
-        browser versions. A visible, sized canvas is only a candidate signal;
-        the final decision is made from captured-pixel sampling so a blank or
-        loading canvas cannot trigger the real screenshot. Xiaohongshu normally
-        exposes the note media as an image or video under ``#noteContainer``.
-        """
-        try:
-            return await page.evaluate(
-                """
-                ({platform, lostMarkers}) => {
-                    const text = `${document.title || ''}\n${document.body?.innerText || ''}`
-                        .replace(/\\s+/g, ' ')
-                        .trim();
-                    const href = location.href || '';
-                    const marker = lostMarkers.find(item => text.includes(item));
-                    const hasKnownErrorCode = /(?:error_code|errorCode)=300012(?:&|$)/i.test(href);
-
-                    if (marker || hasKnownErrorCode) {
-                        return {
-                            status: 'lost',
-                            reason: marker || '页面返回不可访问错误码 300012',
-                        };
-                    }
-
-                    const visible = element => {
-                        if (!element) return false;
-                        const rect = element.getBoundingClientRect();
-                        const style = getComputedStyle(element);
-                        return rect.width > 10 && rect.height > 10 &&
-                            style.display !== 'none' &&
-                            style.visibility !== 'hidden' &&
-                            Number(style.opacity || 1) > 0;
-                    };
-
-                    const mediaRect = element => {
-                        const rect = element.getBoundingClientRect();
-                        return rect.width >= 100 && rect.height >= 100;
-                    };
-
-                    const rectObject = element => {
-                        const rect = element.getBoundingClientRect();
-                        return {
-                            x: rect.x,
-                            y: rect.y,
-                            width: rect.width,
-                            height: rect.height,
-                        };
-                    };
-
-                    const loadingNodes = [...document.querySelectorAll('*')].filter(element => {
-                        if (!visible(element)) return false;
-                        const value = (element.innerText || '').trim().replace(/\\s+/g, ' ');
-                        return value.length > 0 && value.length <= 20 &&
-                            /加载中|视频数据|正在加载/i.test(value);
-                    });
-                    const hasCenterLoading = loadingNodes.some(element => {
-                        const rect = element.getBoundingClientRect();
-                        const centerX = rect.left + rect.width / 2;
-                        const centerY = rect.top + rect.height / 2;
-                        return centerX >= window.innerWidth * 0.2 &&
-                            centerX <= window.innerWidth * 0.8 &&
-                            centerY >= window.innerHeight * 0.1 &&
-                            centerY <= window.innerHeight * 0.9;
-                    });
-
-                    if (platform === 'douyin') {
-                        const activePlayer = document.querySelector(
-                            '[data-e2e="feed-active-video"], #sliderVideo'
-                        );
-                        const activeId = activePlayer?.getAttribute('data-e2e-vid') || '';
-                        const videos = [...document.querySelectorAll('video')].filter(video =>
-                            visible(video) && mediaRect(video) &&
-                            video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0
-                        );
-                        const canvases = [...document.querySelectorAll('canvas')].filter(canvas =>
-                            visible(canvas) && mediaRect(canvas) &&
-                            canvas.width >= 200 && canvas.height >= 200
-                        );
-                        const candidate = videos[0] || canvases[0];
-
-                        if (hasCenterLoading) {
-                            return {
-                                status: 'waiting',
-                                reason: '抖音中央播放器仍显示加载状态',
-                            };
-                        }
-
-                        if (candidate && (activeId || videos.length)) {
-                            return {
-                                status: 'candidate',
-                                rect: rectObject(candidate),
-                                reason: videos.length ? 'video 已进入可绘制状态，等待画面采样' : '活动播放器画布已创建，等待画面采样',
-                            };
-                        }
-
-                        return {
-                            status: 'waiting',
-                            reason: '等待抖音活动播放器和媒体画面',
-                        };
-                    }
-
-                    if (platform === 'xhs') {
-                        const noteContainer = document.querySelector(
-                            '#noteContainer, [data-e2e="note-container"]'
-                        );
-                        if (!noteContainer || !visible(noteContainer)) {
-                            return { status: 'waiting', reason: '等待小红书笔记容器' };
-                        }
-
-                        const videos = [...noteContainer.querySelectorAll('video')].filter(video =>
-                            visible(video) && mediaRect(video) &&
-                            video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0
-                        );
-                        const images = [...noteContainer.querySelectorAll('img')].filter(image =>
-                            visible(image) && mediaRect(image) && image.complete &&
-                            image.naturalWidth >= 100 && image.naturalHeight >= 100
-                        );
-                        const candidate = videos[0] || images[0];
-
-                        if (hasCenterLoading) {
-                            return {
-                                status: 'waiting',
-                                reason: '小红书中央媒体仍显示加载状态',
-                            };
-                        }
-
-                        if (candidate) {
-                            return {
-                                status: 'candidate',
-                                rect: rectObject(candidate),
-                                reason: videos.length ? '小红书视频已进入可绘制状态，等待画面采样' : '小红书笔记图片已加载，等待画面采样',
-                            };
-                        }
-
-                        return { status: 'waiting', reason: '等待小红书笔记媒体加载' };
-                    }
-
-                    return { status: 'ready', reason: '非动态媒体平台' };
-                }
-                """,
-                {
-                    "platform": platform,
-                    "lostMarkers": [
-                        "作品不存在",
-                        "此作品不存在",
-                        "该作品已被删除",
-                        "作品已被删除",
-                        "作品不可见",
-                        "该作品不可见",
-                        "视频不存在",
-                        "视频已被删除",
-                        "该视频已被删除",
-                        "视频已下架",
-                        "内容不存在",
-                        "内容已删除",
-                        "内容已被删除",
-                        "内容已下架",
-                        "内容不可见",
-                        "笔记不存在",
-                        "该笔记不存在",
-                        "笔记已被删除",
-                        "该笔记已被删除",
-                        "笔记已下架",
-                        "该笔记已下架",
-                        "笔记不可见",
-                        "当前笔记不可见",
-                        "该内容无法查看",
-                        "页面不存在",
-                        "页面无法访问",
-                        "暂时无法查看",
-                        "安全限制",
-                        "IP存在风险",
-                        "无法访问此网站",
-                    ],
-                },
-            )
-        except Exception as exc:
-            # 页面跳转/刷新期间执行脚本可能遇到 execution context destroyed；
-            # 这不是内容丢失，下一轮轮询继续检查即可。
-            logger.debug("[{}] 检查页面媒体状态失败，继续等待: {}", platform, exc)
-            return {"status": "waiting", "reason": "页面仍在跳转或渲染"}
-
-    @staticmethod
-    def _frame_sample_is_valid(image_bytes: bytes) -> bool:
-        """Reject the uniformly dark/loading canvas produced before a video frame."""
-        try:
-            from PIL import Image, ImageStat
-
-            image = Image.open(BytesIO(image_bytes)).convert("RGB").resize((64, 64))
-            stats = ImageStat.Stat(image)
-            mean_luminance = sum(stats.mean) / 3
-            variance = sum(stats.var) / 3
-            pixels = list(image.getdata())
-            active_ratio = sum(
-                1
-                for red, green, blue in pixels
-                if max(red, green, blue) > 45 or max(red, green, blue) - min(red, green, blue) > 12
-            ) / max(1, len(pixels))
-
-            # A legitimate dark video can still be accepted when it has enough
-            # texture/color variation; a black canvas and loading dots cannot.
-            return (
-                mean_luminance >= 35 and variance >= 120 and active_ratio >= 0.05
-            ) or (variance >= 250 and active_ratio >= 0.12) or (
-                mean_luminance >= 55 and active_ratio >= 0.25
-            )
-        except Exception:
-            return False
-
-    async def _sample_media_frame(self, page: Page, rect: Dict[str, Any]) -> bool:
-        """Capture only the candidate media area and verify it is not a blank canvas."""
-        try:
-            viewport = await page.evaluate("() => ({width: innerWidth, height: innerHeight})")
-            x = max(0.0, float(rect.get("x", 0)))
-            y = max(0.0, float(rect.get("y", 0)))
-            right = min(float(viewport["width"]), x + float(rect.get("width", 0)))
-            bottom = min(float(viewport["height"]), y + float(rect.get("height", 0)))
-            if right - x < 100 or bottom - y < 100:
-                return False
-
-            image_bytes = await page.screenshot(
-                type="png",
-                clip={"x": x, "y": y, "width": right - x, "height": bottom - y},
-            )
-            return self._frame_sample_is_valid(image_bytes)
-        except Exception as exc:
-            logger.debug("媒体画面采样失败，继续等待: {}", exc)
-            return False
-
-    async def _wait_for_content_ready(self, page: Page, platform: str, url: str) -> bool:
-        """Wait for a real platform media signal, or stop on a known bad page."""
-        deadline = time.monotonic() + max(0.0, MEDIA_READY_TIMEOUT)
-        valid_sample_streak = 0
-        while True:
-            await self._dismiss_login_overlay(page, platform)
-            state = await self._inspect_content_state(page, platform)
-            status = state.get("status")
-            if status == "lost":
-                logger.warning("[{}] 内容已丢失或不可访问，跳过等待和截图: {} ({})", platform, url, state.get("reason"))
-                return False
-            if status == "candidate":
-                if await self._sample_media_frame(page, state.get("rect") or {}):
-                    valid_sample_streak += 1
-                    if valid_sample_streak >= 2:
-                        logger.info("[{}] 视频帧采样连续通过，立即截图 ({})", platform, state.get("reason"))
-                        return True
-                else:
-                    valid_sample_streak = 0
-            else:
-                valid_sample_streak = 0
-
-            if time.monotonic() >= deadline:
-                logger.warning(
-                    "[{}] {} 秒内未检测到可用媒体画面，按内容不可访问处理: {}",
-                    platform,
-                    MEDIA_READY_TIMEOUT,
-                    url,
-                )
-                return False
-
-            await page.wait_for_timeout(max(50, int(MEDIA_READY_POLL_INTERVAL * 1000)))
-
     async def process_any_url(self, url: str, force_screenshot_only: bool = False, use_temp_file: bool = False, retry_count: int = 0) -> Optional[Dict[str, Any]]:
         """
         统一入口：处理任意 URL，自动判断平台并分发
@@ -842,9 +578,9 @@ class PlaywrightIpChecker:
                 logger.info("正在访问: {} (Force Screenshot: {})", url, force_screenshot_only)
                 
                 # 1. 访问 URL
-                navigation_response = None
                 try:
-                    navigation_response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(1000)
                 except Exception as e:
                     logger.warning("页面加载可能不完整: {}", e)
 
@@ -912,25 +648,12 @@ class PlaywrightIpChecker:
                 if platform == "unknown":
                     logger.debug("未知平台链接，将仅执行截图: {}", final_url)
 
-                if navigation_response is not None and navigation_response.status >= 400:
-                    logger.warning(
-                        "[{}] 内容请求返回 HTTP {}，按内容已丢失处理: {}",
-                        platform,
-                        navigation_response.status,
-                        url,
-                    )
-                    return None
-
-                # 4. 特殊处理：检测遮罩 (针对小红书等)
+                # 4. 抖音和小红书游客模式：关闭登录弹窗并清理遮罩。
                 if platform in {"douyin", "xhs"}:
                     await self._dismiss_login_overlay(page, platform)
 
-                # 4.5 动态媒体使用真实就绪信号；其他平台保留原有额外等待。
-                if platform in {"douyin", "xhs"}:
-                    if not await self._wait_for_content_ready(page, platform, url):
-                        return None
-                    await self._dismiss_login_overlay(page, platform)
-                elif SCREENSHOT_DELAY > 0:
+                # 4.5 等待加载
+                if SCREENSHOT_DELAY > 0:
                     logger.info("[{}] 截图前额外等待 {} 秒...", platform, SCREENSHOT_DELAY)
                     await asyncio.sleep(SCREENSHOT_DELAY)
 
