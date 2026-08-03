@@ -1,4 +1,6 @@
 import asyncio
+import secrets
+import string
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -13,6 +15,11 @@ from src.wechat.msg_handler import async_process_message
 
 
 setup_logger(level=global_config.LOG_LEVEL)
+
+
+def _new_message_id() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(8))
 
 
 def build_dd_sender():
@@ -74,6 +81,12 @@ async def receive_message(request: Request):
     """
     接收新版 vxhook 推送的 HTTP 消息。
     """
+    message_id = _new_message_id()
+    with logger.contextualize(message_id=message_id):
+        return await _handle_receive_message(request, message_id)
+
+
+async def _handle_receive_message(request: Request, message_id: str):
     try:
         msg_data = await request.json()
     except Exception as exc:
@@ -131,5 +144,8 @@ async def receive_message(request: Request):
 
     # 6. 将原始字典数据分发给业务逻辑
     dd_sender = getattr(request.app.state, "dd_sender", None)
-    asyncio.create_task(async_process_message(msg_data=msg_data, chat=None, dd_sender=dd_sender))
+    asyncio.create_task(
+        async_process_message(msg_data=msg_data, chat=None, dd_sender=dd_sender),
+        name=f"wx-msg-{message_id}",
+    )
     return {"code": 0, "msg": "success"}

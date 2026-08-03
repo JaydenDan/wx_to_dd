@@ -64,12 +64,11 @@ async def process_video_task(url: str, dd_sender):
             logger.error("VideoClient 未初始化，跳过视频下载")
             return
 
-        # 在线程池中执行耗时操作 (解析和下载)
-        loop = asyncio.get_running_loop()
-        
+        # 在线程池中执行耗时操作，并保留当前消息的日志关联 ID。
+
         # 1. 解析
         # 平台解析通常很快，但也可能涉及网络请求
-        video_infos = await loop.run_in_executor(None, video_manager.parse_video_url, url)
+        video_infos = await asyncio.to_thread(video_manager.parse_video_url, url)
         if not video_infos:
             logger.warning(f"无法解析视频 URL: {url}")
             return
@@ -126,7 +125,7 @@ async def process_video_task(url: str, dd_sender):
 
         # 4. 下载
         logger.info(f"正在下载 {len(filtered_video_infos)} 个视频...")
-        downloaded_infos = await loop.run_in_executor(None, client.download, filtered_video_infos)
+        downloaded_infos = await asyncio.to_thread(client.download, filtered_video_infos)
         
         if downloaded_infos is None:
             downloaded_infos = filtered_video_infos

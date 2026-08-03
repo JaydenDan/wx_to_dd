@@ -3,6 +3,9 @@ import sys
 import logging
 from loguru import logger
 
+
+DEFAULT_MESSAGE_ID = "--------"
+
 # 拦截标准库 logging 的 Handler
 class InterceptHandler(logging.Handler):
     def emit(self, record):
@@ -28,12 +31,14 @@ def setup_logger(level: str = "INFO", log_dir: str = "logs", log_filename: str =
     """
     # 移除默认的 handler
     logger.remove()
+    # 所有日志都有固定的关联 ID 字段；未归属某条微信消息的系统日志使用默认值。
+    logger.configure(extra={"message_id": DEFAULT_MESSAGE_ID})
 
     # 1. 控制台输出
     logger.add(
         sys.stdout,
         level=level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <cyan>[{extra[message_id]}]</cyan> <level>{message}</level>",
     )
 
     # 2. 文件输出
@@ -48,7 +53,7 @@ def setup_logger(level: str = "INFO", log_dir: str = "logs", log_filename: str =
         rotation="10 MB",  # 轮转大小
         retention="1 week", # 保留时间
         encoding="utf-8",
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - [{extra[message_id]}] {message}",
         enqueue=True, # 异步写入
         backtrace=True,
         diagnose=True,
