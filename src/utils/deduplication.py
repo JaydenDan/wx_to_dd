@@ -13,8 +13,13 @@ URL_CACHE_LOCK = asyncio.Lock()  # 2. 创建一个全局的异步锁
 _URL_KEY_CACHE = LRUCache(maxsize=512)
 _URL_KEY_CACHE_LOCK = asyncio.Lock()
 _XHS_SHORT_HOSTS = {"xhslink.cn", "xhslink.com"}
+_DOUYIN_SHORT_HOSTS = {"v.douyin.com"}
 _XHS_NOTE_ID_PATTERN = re.compile(
     r"/(?:explore|discovery/item|item)/([0-9a-zA-Z]+)(?:/|$)",
+    re.IGNORECASE,
+)
+_DOUYIN_VIDEO_ID_PATTERN = re.compile(
+    r"/(?:share/)?video/(\d+)(?:/|$)",
     re.IGNORECASE,
 )
 _URL_TRAILING_CHARS = " \t\r\n,，。！？；：、)]}》」』"
@@ -41,6 +46,26 @@ def _xhs_note_id(url: str) -> str | None:
 
     match = _XHS_NOTE_ID_PATTERN.search(parsed.path)
     return match.group(1).lower() if match else None
+
+
+def _douyin_video_id(url: str) -> str | None:
+    """从抖音完整页面地址中提取稳定的作品 ID。"""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+
+    hostname = (parsed.hostname or "").lower()
+    if not (
+        hostname == "douyin.com"
+        or hostname.endswith(".douyin.com")
+        or hostname == "iesdouyin.com"
+        or hostname.endswith(".iesdouyin.com")
+    ):
+        return None
+
+    match = _DOUYIN_VIDEO_ID_PATTERN.search(parsed.path)
+    return match.group(1) if match else None
 
 
 async def _resolve_xhs_short_url(url: str) -> str | None:
@@ -96,8 +121,59 @@ async def _resolve_xhs_short_url(url: str) -> str | None:
         return None
 
 
+async def _resolve_douyin_short_url(url: str) -> str | None:
+    """解析抖音短链跳转，并提取最终页面的作品 ID。"""
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        current_url = url
+        async with AsyncSession() as session:
+            for _ in range(3):
+                response = await asyncio.wait_for(
+                    session.get(
+                        current_url,
+                        headers=headers,
+                        allow_redirects=False,
+                        timeout=6,
+                    ),
+                    timeout=8,
+                )
+
+                location = response.headers.get("location")
+                if location:
+                    redirect_url = urljoin(current_url, location)
+                    video_id = _douyin_video_id(redirect_url)
+                    if video_id:
+                        return video_id
+
+                    redirect_host = (urlparse(redirect_url).hostname or "").lower()
+                    if redirect_host in _DOUYIN_SHORT_HOSTS:
+                        current_url = redirect_url
+                        continue
+                    return None
+
+                body = response.text[:1_000_000]
+                match = re.search(
+                    r"https?://(?:www\.)?(?:douyin\.com|iesdouyin\.com)/(?:share/)?video/\d+",
+                    body,
+                    re.IGNORECASE,
+                )
+                return _douyin_video_id(match.group(0)) if match else None
+
+        return None
+    except Exception as exc:
+        logger.debug("抖音短链解析失败，暂按原链接去重: {} ({})", url, exc)
+        return None
+
+
 async def get_url_dedup_key(url: str) -> str:
-    """返回用于去重的稳定键，小红书短链统一到真实笔记 ID。"""
+    """返回稳定去重键，将小红书笔记和抖音作品统一到内容 ID。"""
     normalized_url = _normalize_url(url)
     if not normalized_url:
         return ""
@@ -106,13 +182,17 @@ async def get_url_dedup_key(url: str) -> str:
     if note_id:
         return f"xhs:{note_id}"
 
+    video_id = _douyin_video_id(normalized_url)
+    if video_id:
+        return f"douyin:{video_id}"
+
     try:
         parsed = urlparse(normalized_url)
         hostname = (parsed.hostname or "").lower()
     except ValueError:
         hostname = ""
 
-    if hostname not in _XHS_SHORT_HOSTS:
+    if hostname not in _XHS_SHORT_HOSTS and hostname not in _DOUYIN_SHORT_HOSTS:
         return normalized_url
 
     async with _URL_KEY_CACHE_LOCK:
@@ -120,12 +200,19 @@ async def get_url_dedup_key(url: str) -> str:
     if cached_key:
         return cached_key
 
-    resolved_note_id = await _resolve_xhs_short_url(normalized_url)
-    dedup_key = f"xhs:{resolved_note_id}" if resolved_note_id else normalized_url
-    if resolved_note_id:
+    if hostname in _XHS_SHORT_HOSTS:
+        resolved_content_id = await _resolve_xhs_short_url(normalized_url)
+        dedup_key = f"xhs:{resolved_content_id}" if resolved_content_id else normalized_url
+        platform_name = "小红书"
+    else:
+        resolved_content_id = await _resolve_douyin_short_url(normalized_url)
+        dedup_key = f"douyin:{resolved_content_id}" if resolved_content_id else normalized_url
+        platform_name = "抖音"
+
+    if resolved_content_id:
         async with _URL_KEY_CACHE_LOCK:
             _URL_KEY_CACHE[normalized_url] = dedup_key
-        logger.debug("小红书短链已归一化: {} -> {}", normalized_url, dedup_key)
+        logger.debug("{}短链已归一化: {} -> {}", platform_name, normalized_url, dedup_key)
     return dedup_key
 
 # 注意：函数现在是异步的 (async def)
@@ -211,5 +298,4 @@ async def mark_username_as_processed(username: str):
     async with USERNAME_CACHE_LOCK:
         PROCESSED_USERNAMES_CACHE[username] = True
         logger.debug("已将用户名标记为已处理: {}", username)
-
 

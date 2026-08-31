@@ -192,13 +192,8 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
 
         quote_url_match = global_config.URL_PATTERN.search(msg_quote_content)
         quote_url = quote_url_match.group(0) if quote_url_match else None
-        quote_url_claimed = False
-        if global_config.SYSTEM_ENV == 'prod' and quote_url:
-            quote_url_claimed = await claim_url_if_not_processed(quote_url)
-            if not quote_url_claimed:
-                logger.info("引用消息对应的实际内容已被处理，跳过: {}", quote_url)
-                return
-        
+
+        # 落查属于人工命中指令，必须绕过 URL 和作者去重，命中后直接转发。
         # 如果是引用消息则直接判断关键词返回即可
         if check_keyword(msg_type, msg_content, msg_quote_content):
             logger.info("✅ 规则匹配：关键词")
@@ -206,16 +201,11 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
             cleaned_quote = msg_cleaner(msg_quote_content)
             final_text = msg_restructure(quote_content=cleaned_quote, msg_content=msg_content)
 
-            try:
-                if dd_sender is None:
-                    await send_to_dd(msg=final_text)
-                else:
-                    await dd_sender.send(final_text)
-            except Exception:
-                if quote_url_claimed and quote_url:
-                    await release_claimed_url(quote_url)
-                raise
-            
+            if dd_sender is None:
+                await send_to_dd(msg=final_text)
+            else:
+                await dd_sender.send(final_text)
+
             # 关键词命中后，直接在当前协程/任务中顺序执行后续逻辑
             if dd_sender and msg_quote_content:
                 # 1. 截图并补发图文消息
@@ -229,9 +219,6 @@ async def async_process_message(msg_data: dict, chat, dd_sender):
                     await process_video_task(quote_url, dd_sender)
 
             return
-
-        if quote_url_claimed and quote_url:
-            await release_claimed_url(quote_url)
 
         return
 
